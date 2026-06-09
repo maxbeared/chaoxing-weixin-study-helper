@@ -20,7 +20,7 @@
     "*://*.xuexi365.com/*"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background/background.js"
   },
   "content_scripts": [
     {
@@ -33,14 +33,24 @@
         "*://*.xuexi365.com/*"
       ],
       "js": [
-        "content.js"
+        "content/state.js",
+        "content/runtime.js",
+        "content/video.js",
+        "content/quiz-extraction.js",
+        "content/image-rendering.js",
+        "content/remote-commands.js",
+        "content/weixin-delivery.js",
+        "content/answer-state.js",
+        "content/remote-bridge.js",
+        "content/quiz-panel.js",
+        "content/content.js"
       ],
       "run_at": "document_idle",
       "all_frames": true
     }
   ],
   "action": {
-    "default_popup": "popup.html",
+    "default_popup": "popup/popup.html",
     "default_title": "Chaoxing Weixin Study Helper"
   }
 }

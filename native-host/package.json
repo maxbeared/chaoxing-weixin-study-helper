@@ -23,6 +23,7 @@
   },
   "pkg": {
     "scripts": [
+      "src/**/*.mjs",
       "node_modules/typr.js/index.js"
     ]
   }

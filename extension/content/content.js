@@ -1,0 +1,26 @@
+installRuntimeErrorReporter();
+loadSettings();
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "sync") return;
+  for (const [key, change] of Object.entries(changes)) {
+    settings[key] = change.newValue;
+  }
+});
+
+scanVideos();
+watchManualSubmitClicks();
+ensureQuizPanel();
+scheduleWrongQuestionScan();
+const observer = new MutationObserver((mutations) => {
+  for (const mutation of mutations) {
+    for (const node of mutation.addedNodes) {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        scanVideos(node);
+      }
+    }
+  }
+  ensureQuizPanel();
+  scheduleWrongQuestionScan();
+  clickNextConfirmIfShown();
+});
+observer.observe(document.documentElement, { childList: true, subtree: true });
