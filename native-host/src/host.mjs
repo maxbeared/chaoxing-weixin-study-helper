@@ -29,6 +29,7 @@ const MAX_LOG_BYTES = 1024 * 1024;
 const ACCOUNT_FILE = path.join(STATE_DIR, "accounts.json");
 const SYNC_FILE = path.join(STATE_DIR, "sync.json");
 const LLM_FILE = path.join(STATE_DIR, "llm.json");
+const ACTIVE_LOGIN_FILE = path.join(STATE_DIR, "active-logins.json");
 const CXSECRET_TABLE_FILE = path.join(STATE_DIR, "cxsecret-table.json");
 const activeLogins = new Map();
 let typrModule = null;
@@ -190,6 +191,42 @@ function saveLlmSettingsFile(settings) {
   fs.writeFileSync(LLM_FILE, JSON.stringify(settings, null, 2), "utf8");
   try {
     fs.chmodSync(LLM_FILE, 0o600);
+  } catch {
+    // Best effort only on Windows.
+  }
+}
+
+function loadActiveLoginsFromDisk() {
+  activeLogins.clear();
+  try {
+    if (!fs.existsSync(ACTIVE_LOGIN_FILE)) return;
+    const parsed = JSON.parse(fs.readFileSync(ACTIVE_LOGIN_FILE, "utf8"));
+    const sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
+    const now = Date.now();
+    for (const session of sessions) {
+      if (!session?.sessionKey || !session.qrcode || !session.startedAt) continue;
+      if (now - Number(session.startedAt) > ACTIVE_LOGIN_TTL_MS) continue;
+      activeLogins.set(session.sessionKey, session);
+    }
+  } catch {
+    activeLogins.clear();
+  }
+}
+
+function saveActiveLoginsToDisk() {
+  ensureStateDir();
+  const sessions = Array.from(activeLogins.values());
+  if (!sessions.length) {
+    try {
+      if (fs.existsSync(ACTIVE_LOGIN_FILE)) fs.rmSync(ACTIVE_LOGIN_FILE, { force: true });
+    } catch {
+      // Best effort cleanup.
+    }
+    return;
+  }
+  fs.writeFileSync(ACTIVE_LOGIN_FILE, JSON.stringify({ sessions }, null, 2), "utf8");
+  try {
+    fs.chmodSync(ACTIVE_LOGIN_FILE, 0o600);
   } catch {
     // Best effort only on Windows.
   }
@@ -490,10 +527,16 @@ async function pollQRStatus(login, verifyCode) {
 
 // Weixin login flow.
 function purgeExpiredLogins() {
+  loadActiveLoginsFromDisk();
   const now = Date.now();
+  let changed = false;
   for (const [key, login] of activeLogins.entries()) {
-    if (now - login.startedAt > ACTIVE_LOGIN_TTL_MS) activeLogins.delete(key);
+    if (now - login.startedAt > ACTIVE_LOGIN_TTL_MS) {
+      activeLogins.delete(key);
+      changed = true;
+    }
   }
+  if (changed) saveActiveLoginsToDisk();
 }
 
 async function loginStart(message) {
@@ -512,6 +555,7 @@ async function loginStart(message) {
     currentApiBaseUrl: FIXED_BASE_URL,
     pendingVerifyCode: ""
   });
+  saveActiveLoginsToDisk();
 
   const qrDataUrl = await QRCode.toDataURL(response.qrcode_img_content, {
     margin: 2,
@@ -529,6 +573,7 @@ async function loginStart(message) {
 }
 
 async function loginWait(message) {
+  purgeExpiredLogins();
   const login = activeLogins.get(message.sessionKey);
   if (!login) throw new Error("Login session not found or expired.");
   const deadline = Date.now() + Math.max(1000, Number(message.timeoutMs) || 60000);
@@ -540,9 +585,12 @@ async function loginWait(message) {
     if (status.status === "wait" || status.status === "scaned") continue;
     if (status.status === "scaned_but_redirect") {
       if (status.redirect_host) login.currentApiBaseUrl = `https://${status.redirect_host}`;
+      saveActiveLoginsToDisk();
       continue;
     }
     if (status.status === "need_verifycode") {
+      login.pendingVerifyCode = message.verifyCode || login.pendingVerifyCode || "";
+      saveActiveLoginsToDisk();
       return {
         ok: false,
         needVerifyCode: true,
@@ -552,14 +600,17 @@ async function loginWait(message) {
     }
     if (status.status === "expired") {
       activeLogins.delete(message.sessionKey);
+      saveActiveLoginsToDisk();
       return { ok: false, status: status.status, error: "二维码已过期，请重新生成。" };
     }
     if (status.status === "verify_code_blocked") {
       activeLogins.delete(message.sessionKey);
+      saveActiveLoginsToDisk();
       return { ok: false, status: status.status, error: "验证码多次错误，请稍后重试。" };
     }
     if (status.status === "binded_redirect") {
       activeLogins.delete(message.sessionKey);
+      saveActiveLoginsToDisk();
       return { ok: true, alreadyConnected: true, status: status.status, message: "此微信已连接过。" };
     }
     if (status.status === "confirmed") {
@@ -575,6 +626,7 @@ async function loginWait(message) {
       };
       upsertAccount(account);
       activeLogins.delete(message.sessionKey);
+      saveActiveLoginsToDisk();
       return {
         ok: true,
         status: status.status,
