@@ -1,7 +1,10 @@
 node_modules/
 native-host/node_modules/
 native-host/.state/
+native-host/build/
+native-host/dist/
 native-host/*.generated.json
+release/
 page-*.png
 *-inspect.png
 inspect-*.png
