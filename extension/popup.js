@@ -39,6 +39,76 @@ function nativeSend(payload) {
   });
 }
 
+function extensionSend(payload) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(payload, (response) => {
+      const err = chrome.runtime.lastError;
+      if (err) resolve({ ok: false, error: err.message });
+      else resolve(response || { ok: false, error: "No response" });
+    });
+  });
+}
+
+function formatExtensionLogs(logs) {
+  if (!Array.isArray(logs) || !logs.length) return "(扩展运行日志为空)";
+  return logs.map((item) => {
+    const details = item.details ? ` ${JSON.stringify(item.details)}` : "";
+    const tab = item.tabId !== "" && item.tabId !== undefined ? ` tab=${item.tabId}` : "";
+    const url = item.url ? ` url=${item.url}` : "";
+    return `[${item.at}] ${item.level || "info"} ${item.source || "extension"} ${item.event || "log"}${tab}${url}${details}`;
+  }).join("\n");
+}
+
+async function collectLogs() {
+  const [extensionLogs, nativeLogs] = await Promise.all([
+    extensionSend({ type: "get-extension-logs" }),
+    nativeSend({ type: "getLogs" })
+  ]);
+  const sections = [
+    "===== Extension Logs =====",
+    extensionLogs?.ok ? formatExtensionLogs(extensionLogs.logs) : `读取扩展日志失败：${extensionLogs?.error || "未知错误"}`,
+    "",
+    "===== Native Runtime Log =====",
+    nativeLogs?.ok ? nativeLogs.runtimeLog || "(native runtime log 为空)" : `读取 native 日志失败：${nativeLogs?.error || "未知错误"}`,
+    "",
+    "===== Native Error Log =====",
+    nativeLogs?.ok ? nativeLogs.errorLog || "(native error log 为空)" : `读取 native 错误日志失败：${nativeLogs?.error || "未知错误"}`,
+    "",
+    nativeLogs?.logDir ? `Native log dir: ${nativeLogs.logDir}` : ""
+  ];
+  return sections.join("\n");
+}
+
+async function viewLogs() {
+  $("logsView").value = "正在读取日志...";
+  $("logsView").value = await collectLogs();
+}
+
+async function downloadLogs() {
+  const text = await collectLogs();
+  $("logsView").value = text;
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `chaoxing-study-helper-logs-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function clearLogs() {
+  const [extensionResult, nativeResult] = await Promise.all([
+    extensionSend({ type: "clear-extension-logs" }),
+    nativeSend({ type: "clearLogs" })
+  ]);
+  $("logsView").value = [
+    extensionResult?.ok ? "扩展日志已清空。" : `扩展日志清空失败：${extensionResult?.error || "未知错误"}`,
+    nativeResult?.ok ? "Native 日志已清空。" : `Native 日志清空失败：${nativeResult?.error || "未知错误"}`
+  ].join("\n");
+}
+
 function updateLlmPresetUi(forceDefaults = false) {
   const preset = $("llmPreset").value;
   const config = LLM_PRESETS[preset];
@@ -288,6 +358,9 @@ $("saveLlmBtn").addEventListener("click", saveLlmSettings);
 $("llmPreset").addEventListener("change", () => updateLlmPresetUi(true));
 $("switchModelBtn").addEventListener("click", switchToLatestModel);
 $("enabled").addEventListener("change", saveSettings);
+$("viewLogsBtn").addEventListener("click", viewLogs);
+$("downloadLogsBtn").addEventListener("click", downloadLogs);
+$("clearLogsBtn").addEventListener("click", clearLogs);
 
 loadSettings();
 checkStatus();

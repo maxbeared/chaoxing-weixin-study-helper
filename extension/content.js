@@ -46,6 +46,7 @@
   let cxSecretMap = null;
   let cxSecretLoading = null;
   let cxSecretAttempted = false;
+  const runtimeErrorNotifiedAt = new Map();
 
   function loadSettings() {
     chrome.storage.sync.get(DEFAULTS, (stored) => {
@@ -79,6 +80,83 @@
       video: describeVideo(video),
       frameUrl: location.href,
       ts: Date.now()
+    });
+  }
+
+  function sendExtensionNotice(kind, title, detail = "", extra = {}) {
+    if (!settings.enabled) return;
+    try {
+      chrome.runtime.sendMessage({
+        type: "extension-notice",
+        notice: {
+          kind,
+          title,
+          detail,
+          pageTitle: titleForPage(),
+          pageUrl: location.href,
+          frameUrl: location.href,
+          ts: Date.now(),
+          ...extra
+        }
+      });
+    } catch {
+      // Notification failures must not break the page workflow.
+    }
+  }
+
+  function writeRuntimeLog(level, event, details = {}) {
+    try {
+      chrome.runtime.sendMessage({
+        type: "runtime-log",
+        level,
+        source: "content",
+        event,
+        details: {
+          pageTitle: titleForPage(),
+          pageUrl: location.href,
+          frameUrl: location.href,
+          ...details
+        }
+      });
+    } catch {
+      // Logging is best-effort only.
+    }
+  }
+
+  function installRuntimeErrorReporter() {
+    const extensionBaseUrl = chrome.runtime.getURL("");
+    const isOwnErrorEvent = (event) => {
+      const filename = String(event.filename || "");
+      return filename.startsWith(extensionBaseUrl);
+    };
+    const notify = (kind, error, fallback = "") => {
+      const message = error instanceof Error
+        ? `${error.name || "Error"}: ${error.message || fallback}`
+        : String(error || fallback || "未知错误");
+      const stack = error instanceof Error && error.stack ? `\n${error.stack}` : "";
+      const dedupeKey = `${kind}:${message}`.slice(0, 240);
+      const now = Date.now();
+      const last = runtimeErrorNotifiedAt.get(dedupeKey) || 0;
+      if (now - last < 60_000) return;
+      runtimeErrorNotifiedAt.set(dedupeKey, now);
+      writeRuntimeLog("error", "runtime_error", {
+        message,
+        stack
+      });
+      sendExtensionNotice(
+        "runtime_error",
+        "超星学习助手运行出错",
+        `${message}${stack}`.slice(0, 1600),
+        { dedupeKey, cooldownSeconds: 60 }
+      );
+    };
+
+    window.addEventListener("error", (event) => {
+      if (!isOwnErrorEvent(event)) return;
+      notify("error", event.error, event.message);
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      notify("unhandledrejection", event.reason, "Promise 执行失败");
     });
   }
 
@@ -208,7 +286,7 @@
     }
   }
 
-  function clickNextLesson(video) {
+  async function clickNextLesson(video) {
     if (!settings.enabled || !settings.autoNextOnEnded || nextClicked.has(video)) return;
     if (hasRemoteSubmitPending()) return;
     nextClicked.add(video);
@@ -216,17 +294,56 @@
 
     const button = findNextButton();
     if (button) {
-      button.click();
-      scheduleNextConfirmAttempts();
-      scheduleAutoPlayAttempts();
+      try {
+        writeRuntimeLog("info", "auto_next_clicking", {
+          selector: button.id ? `#${button.id}` : button.className || button.tagName
+        });
+        sendExtensionNotice(
+          "next_lesson",
+          "正在切换下一节",
+          `即将点击页面中的下一节按钮。\n选择器：${button.id ? `#${button.id}` : button.className || button.tagName}`,
+          { dedupeKey: `next:${location.href}`, cooldownSeconds: 10 }
+        );
+        button.click();
+        scheduleNextConfirmAttempts();
+        scheduleAutoPlayAttempts();
+      } catch (error) {
+        writeRuntimeLog("error", "auto_next_click_failed", {
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack || "" : ""
+        });
+        sendExtensionNotice(
+          "runtime_error",
+          "切换下一节失败",
+          error instanceof Error ? error.message : String(error),
+          { dedupeKey: `next-error:${location.href}`, cooldownSeconds: 30 }
+        );
+      }
       return;
     }
 
-    chrome.runtime.sendMessage({
+    const response = await askExtension({
       type: "auto-next-request",
       pageUrl: location.href,
       ts: Date.now()
     });
+    if (response?.ok) {
+      writeRuntimeLog("info", "auto_next_clicked_in_frames", response);
+      sendExtensionNotice(
+        "next_lesson",
+        "正在切换下一节",
+        `已在页面所有 frame 中触发下一节按钮。${response.selector ? `\n选择器：${response.selector}` : ""}`,
+        { dedupeKey: `next:${location.href}`, cooldownSeconds: 10 }
+      );
+    } else {
+      writeRuntimeLog("error", "auto_next_failed", response || { error: "No response" });
+      sendExtensionNotice(
+        "runtime_error",
+        "切换下一节失败",
+        response?.error || "没有找到下一节按钮。",
+        { dedupeKey: `next-error:${location.href}`, cooldownSeconds: 30 }
+      );
+    }
     scheduleNextConfirmAttempts();
     scheduleAutoPlayAttempts();
   }
@@ -463,6 +580,102 @@
     });
   }
 
+  function inlineComputedStyles(source, target) {
+    if (!(source instanceof Element) || !(target instanceof Element)) return;
+    const computed = getComputedStyle(source);
+    const keep = [
+      "box-sizing", "display", "position", "width", "min-width", "max-width", "height", "min-height", "max-height",
+      "margin", "padding", "border", "border-radius", "background", "background-color", "color",
+      "font", "font-family", "font-size", "font-weight", "font-style", "line-height", "letter-spacing",
+      "text-align", "text-decoration", "white-space", "word-break", "overflow-wrap", "vertical-align",
+      "list-style", "list-style-type", "box-shadow", "opacity"
+    ];
+    target.setAttribute("style", keep.map((name) => `${name}:${computed.getPropertyValue(name)}`).join(";"));
+
+    const sourceChildren = Array.from(source.children);
+    const targetChildren = Array.from(target.children);
+    for (let i = 0; i < sourceChildren.length; i += 1) {
+      inlineComputedStyles(sourceChildren[i], targetChildren[i]);
+    }
+  }
+
+  function copyFormState(source, target) {
+    if (!(source instanceof Element) || !(target instanceof Element)) return;
+    if (source instanceof HTMLInputElement && target instanceof HTMLInputElement) {
+      target.checked = source.checked;
+      target.value = source.value;
+      if (source.checked) target.setAttribute("checked", "checked");
+      target.setAttribute("value", source.value);
+    }
+    if (source instanceof HTMLTextAreaElement && target instanceof HTMLTextAreaElement) {
+      target.value = source.value;
+      target.textContent = source.value;
+    }
+    if (source instanceof HTMLSelectElement && target instanceof HTMLSelectElement) {
+      target.value = source.value;
+    }
+
+    const sourceChildren = Array.from(source.children);
+    const targetChildren = Array.from(target.children);
+    for (let i = 0; i < sourceChildren.length; i += 1) {
+      copyFormState(sourceChildren[i], targetChildren[i]);
+    }
+  }
+
+  function renderElementImageDataUrl(element) {
+    return new Promise((resolve) => {
+      if (!(element instanceof HTMLElement)) {
+        resolve("");
+        return;
+      }
+      const rect = element.getBoundingClientRect();
+      const width = Math.max(320, Math.min(1200, Math.ceil(rect.width || element.scrollWidth || 800)));
+      const height = Math.max(120, Math.min(1800, Math.ceil(rect.height || element.scrollHeight || 300)));
+      const clone = element.cloneNode(true);
+      inlineComputedStyles(element, clone);
+      copyFormState(element, clone);
+      clone.style.position = "static";
+      clone.style.transform = "none";
+      clone.style.width = `${width}px`;
+      clone.style.minHeight = `${height}px`;
+      clone.style.margin = "0";
+      clone.style.background = getComputedStyle(element).backgroundColor || "#fff";
+
+      const wrapper = document.createElement("div");
+      wrapper.setAttribute("xmlns", "http://www.w3.org/1999/xhtml");
+      wrapper.style.width = `${width}px`;
+      wrapper.style.minHeight = `${height}px`;
+      wrapper.style.padding = "14px";
+      wrapper.style.boxSizing = "border-box";
+      wrapper.style.background = "#fff";
+      wrapper.appendChild(clone);
+
+      const serialized = new XMLSerializer().serializeToString(wrapper);
+      const svg = [
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${width + 28}" height="${height + 28}">`,
+        `<foreignObject width="100%" height="100%">${serialized}</foreignObject>`,
+        "</svg>"
+      ].join("");
+      const image = new Image();
+      image.onload = () => {
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = image.naturalWidth || width + 28;
+          canvas.height = image.naturalHeight || height + 28;
+          const ctx = canvas.getContext("2d");
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(image, 0, 0);
+          resolve(canvas.toDataURL("image/jpeg", 0.82));
+        } catch {
+          resolve("");
+        }
+      };
+      image.onerror = () => resolve("");
+      image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    });
+  }
+
   function questionPayload(question) {
     return {
       qid: question.qid,
@@ -606,25 +819,45 @@
   }
 
   async function sendWeixinText(settings, text) {
+    if (!settings?.targetId) {
+      writeRuntimeLog("info", "weixin_text_skipped", { reason: "missing_target" });
+      return { ok: false, skipped: true, reason: "missing_target" };
+    }
     const chunks = [];
     const raw = String(text || "");
     for (let i = 0; i < raw.length; i += 1800) {
       chunks.push(raw.slice(i, i + 1800));
     }
+    let lastResponse = { ok: true };
     for (const chunk of chunks.length ? chunks : [""]) {
-      await askNative({
+      lastResponse = await askNative({
         type: "sendText",
         targetId: settings.targetId,
         accountId: settings.accountId || undefined,
         contextToken: settings.lastContextToken || undefined,
         text: chunk
       });
+      if (!lastResponse?.ok) {
+        writeRuntimeLog("error", "weixin_text_failed", {
+          error: lastResponse?.error || "Unknown error"
+        });
+      }
     }
+    writeRuntimeLog(lastResponse?.ok ? "info" : "error", "weixin_text_sent", {
+      ok: Boolean(lastResponse?.ok),
+      error: lastResponse?.error || "",
+      chunks: chunks.length || 1
+    });
+    return lastResponse;
   }
 
   async function sendWeixinImage(settings, dataUrl, caption) {
+    if (!settings?.targetId) {
+      writeRuntimeLog("info", "weixin_image_skipped", { reason: "missing_target" });
+      return { ok: false, skipped: true, reason: "missing_target" };
+    }
     if (!dataUrl) return { ok: false, error: "没有可发送的截图。" };
-    return askNative({
+    const response = await askNative({
       type: "sendImageDataUrl",
       targetId: settings.targetId,
       accountId: settings.accountId || undefined,
@@ -632,6 +865,11 @@
       dataUrl,
       caption
     });
+    writeRuntimeLog(response?.ok ? "info" : "error", "weixin_image_sent", {
+      ok: Boolean(response?.ok),
+      error: response?.error || ""
+    });
+    return response;
   }
 
   async function captureQuestionImage(question) {
@@ -642,15 +880,23 @@
     const panel = document.getElementById(QUIZ_PANEL_ID);
     const previousDisplay = panel?.style.display;
     if (panel) panel.style.display = "none";
-    await wait(450);
-    const response = await askExtension({
-      type: "capture-visible-tab",
-      format: "jpeg",
-      quality: 82,
-      delayMs: 120
-    });
-    if (panel) panel.style.display = previousDisplay || "";
-    return response?.ok ? await resizeImageDataUrl(response.dataUrl || "") : "";
+    try {
+      await wait(450);
+      const response = await askExtension({
+        type: "capture-visible-tab",
+        format: "jpeg",
+        quality: 82,
+        delayMs: 120
+      });
+      if (response?.ok) return await resizeImageDataUrl(response.dataUrl || "");
+      writeRuntimeLog("info", "capture_dom_fallback", {
+        error: response?.error || "",
+        inactiveTab: Boolean(response?.inactiveTab)
+      });
+      return await renderElementImageDataUrl(block);
+    } finally {
+      if (panel) panel.style.display = previousDisplay || "";
+    }
   }
 
   async function handleScreenshotCommand(command, settings) {
@@ -1310,6 +1556,7 @@
     startRemoteQuizBridge(questions);
   }
 
+  installRuntimeErrorReporter();
   loadSettings();
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "sync") return;

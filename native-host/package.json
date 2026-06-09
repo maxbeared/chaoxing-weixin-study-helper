@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Native Messaging host for Chaoxing Weixin study helper.",
+  "bin": "host.mjs",
   "engines": {
     "node": ">=22"
   },
@@ -12,6 +13,17 @@
     "typr.js": "^1.0.0"
   },
   "scripts": {
-    "start": "node host.mjs"
+    "start": "node host.mjs",
+    "build:win:x64": "npx --yes @yao-pkg/pkg@latest . --targets node22-win-x64 --output dist/win-x64/chaoxing-weixin-native-host.exe",
+    "build:win:arm64": "npx --yes @yao-pkg/pkg@latest . --targets node22-win-arm64 --output dist/win-arm64/chaoxing-weixin-native-host.exe",
+    "build:macos:x64": "npx --yes @yao-pkg/pkg@latest . --targets node22-macos-x64 --output dist/macos-x64/chaoxing-weixin-native-host",
+    "build:macos:arm64": "npx --yes @yao-pkg/pkg@latest . --targets node22-macos-arm64 --output dist/macos-arm64/chaoxing-weixin-native-host",
+    "build:linux:x64": "npx --yes @yao-pkg/pkg@latest . --targets node22-linux-x64 --output dist/linux-x64/chaoxing-weixin-native-host",
+    "build:native": "npm run build:win:x64 && npm run build:win:arm64 && npm run build:macos:x64 && npm run build:macos:arm64 && npm run build:linux:x64"
+  },
+  "pkg": {
+    "scripts": [
+      "node_modules/typr.js/index.js"
+    ]
   }
 }

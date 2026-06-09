@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
 
@@ -17,13 +18,19 @@ const ACTIVE_LOGIN_TTL_MS = 5 * 60_000;
 const QR_LONG_POLL_TIMEOUT_MS = 35_000;
 const DEFAULT_API_TIMEOUT_MS = 15_000;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const STATE_DIR = path.join(__dirname, ".state");
+const require = createRequire(import.meta.url);
+const HOST_RUNTIME_DIR = process.env.CX_WEIXIN_HOST_DIR || (process.pkg ? path.dirname(process.execPath) : __dirname);
+const STATE_DIR = path.join(HOST_RUNTIME_DIR, ".state");
+const LOG_DIR = path.join(STATE_DIR, "logs");
+const RUNTIME_LOG_FILE = path.join(LOG_DIR, "runtime.log");
+const ERROR_LOG_FILE = path.join(LOG_DIR, "error.log");
+const MAX_LOG_BYTES = 1024 * 1024;
 const ACCOUNT_FILE = path.join(STATE_DIR, "accounts.json");
 const SYNC_FILE = path.join(STATE_DIR, "sync.json");
 const LLM_FILE = path.join(STATE_DIR, "llm.json");
 const CXSECRET_TABLE_FILE = path.join(STATE_DIR, "cxsecret-table.json");
 const activeLogins = new Map();
-let typrModulePromise = null;
+let typrModule = null;
 let cxSecretTablePromise = null;
 
 function buildClientVersion(version) {
@@ -33,6 +40,99 @@ function buildClientVersion(version) {
 
 function ensureStateDir() {
   fs.mkdirSync(STATE_DIR, { recursive: true });
+}
+
+function ensureLogDir() {
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+}
+
+function redactForLog(value) {
+  try {
+    return JSON.parse(JSON.stringify(value, (key, item) => {
+      if (/token|key|authorization|apiKey|api_key|password|secret/i.test(key)) return "[redacted]";
+      if (typeof item === "string" && item.length > 1200) return `${item.slice(0, 1200)}...`;
+      return item;
+    }));
+  } catch {
+    return String(value).slice(0, 1200);
+  }
+}
+
+function rotateLogIfNeeded(file) {
+  try {
+    if (!fs.existsSync(file)) return;
+    const stat = fs.statSync(file);
+    if (stat.size <= MAX_LOG_BYTES) return;
+    const oldFile = `${file}.1`;
+    if (fs.existsSync(oldFile)) fs.rmSync(oldFile, { force: true });
+    fs.renameSync(file, oldFile);
+  } catch {
+    // Logging must never break native messaging.
+  }
+}
+
+function appendHostLog(level, event, details = {}) {
+  try {
+    ensureLogDir();
+    const entry = {
+      at: new Date().toISOString(),
+      level,
+      event,
+      pid: process.pid,
+      platform: `${os.platform()} ${os.release()}`,
+      details: redactForLog(details)
+    };
+    const line = `${JSON.stringify(entry)}\n`;
+    const file = level === "error" ? ERROR_LOG_FILE : RUNTIME_LOG_FILE;
+    rotateLogIfNeeded(file);
+    fs.appendFileSync(file, line, "utf8");
+    if (level === "error") {
+      rotateLogIfNeeded(RUNTIME_LOG_FILE);
+      fs.appendFileSync(RUNTIME_LOG_FILE, line, "utf8");
+    }
+  } catch {
+    // Logging must never break native messaging.
+  }
+}
+
+function readLogFileTail(file, maxBytes = 256 * 1024) {
+  try {
+    if (!fs.existsSync(file)) return "";
+    const stat = fs.statSync(file);
+    const start = Math.max(0, stat.size - maxBytes);
+    const fd = fs.openSync(file, "r");
+    try {
+      const buffer = Buffer.alloc(stat.size - start);
+      fs.readSync(fd, buffer, 0, buffer.length, start);
+      return buffer.toString("utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (error) {
+    return `Failed to read log file ${file}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+function getNativeLogs() {
+  return {
+    ok: true,
+    logDir: LOG_DIR,
+    runtimeLog: readLogFileTail(RUNTIME_LOG_FILE),
+    errorLog: readLogFileTail(ERROR_LOG_FILE)
+  };
+}
+
+function clearNativeLogs() {
+  ensureLogDir();
+  for (const file of [RUNTIME_LOG_FILE, ERROR_LOG_FILE, `${RUNTIME_LOG_FILE}.1`, `${ERROR_LOG_FILE}.1`]) {
+    try {
+      if (fs.existsSync(file)) fs.rmSync(file, { force: true });
+    } catch {
+      // Best effort.
+    }
+  }
+  appendHostLog("info", "logs_cleared");
+  return { ok: true, logDir: LOG_DIR };
 }
 
 function loadAccounts() {
@@ -94,11 +194,12 @@ function saveLlmSettingsFile(settings) {
 }
 
 async function getTypr() {
-  if (!typrModulePromise) {
+  if (!typrModule) {
     globalThis.window = globalThis.window || { TextDecoder };
-    typrModulePromise = import("typr.js").then((mod) => mod.default || mod);
+    const mod = require("typr.js");
+    typrModule = mod.default || mod;
   }
-  return typrModulePromise;
+  return typrModule;
 }
 
 async function loadCxSecretTable() {
@@ -852,6 +953,12 @@ async function explainQuestion(message) {
 }
 
 async function handleMessage(message) {
+  const type = String(message?.type || "unknown");
+  appendHostLog("info", "request_started", {
+    type,
+    fields: Object.keys(message || {}).filter((key) => !/token|key|authorization|api/i.test(key))
+  });
+
   switch (message?.type) {
     case "status": {
       const state = loadAccounts();
@@ -860,6 +967,7 @@ async function handleMessage(message) {
         hostVersion: HOST_VERSION,
         node: process.version,
         platform: `${os.platform()} ${os.release()}`,
+        logDir: LOG_DIR,
         accountCount: state.accounts.length,
         defaultAccountId: state.defaultAccountId || "",
         llmConfigured: Boolean(loadLlmSettings().apiKey)
@@ -885,8 +993,35 @@ async function handleMessage(message) {
       return checkLatestModel();
     case "explainQuestion":
       return explainQuestion(message);
+    case "getLogs":
+      return getNativeLogs();
+    case "clearLogs":
+      return clearNativeLogs();
     default:
       return { ok: false, error: `Unknown message type: ${message?.type}` };
+  }
+}
+
+async function handleMessageWithLogging(message) {
+  const startedAt = Date.now();
+  const type = String(message?.type || "unknown");
+  try {
+    const response = await handleMessage(message);
+    appendHostLog(response?.ok === false ? "error" : "info", "request_finished", {
+      type,
+      ok: response?.ok !== false,
+      error: response?.error || "",
+      durationMs: Date.now() - startedAt
+    });
+    return response;
+  } catch (error) {
+    appendHostLog("error", "request_failed", {
+      type,
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack || "" : "",
+      durationMs: Date.now() - startedAt
+    });
+    throw error;
   }
 }
 
@@ -899,7 +1034,18 @@ function readNativeMessages(onMessage) {
       if (buffer.length < 4 + length) return;
       const payload = buffer.subarray(4, 4 + length).toString("utf8");
       buffer = buffer.subarray(4 + length);
-      onMessage(JSON.parse(payload));
+      try {
+        onMessage(JSON.parse(payload));
+      } catch (error) {
+        appendHostLog("error", "invalid_native_message", {
+          error: error instanceof Error ? error.message : String(error),
+          payloadPreview: payload.slice(0, 500)
+        });
+        writeNativeMessage({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
     }
   });
 }
@@ -911,9 +1057,29 @@ function writeNativeMessage(message) {
   process.stdout.write(Buffer.concat([header, payload]));
 }
 
+process.on("uncaughtException", (error) => {
+  appendHostLog("error", "uncaught_exception", {
+    error: error instanceof Error ? error.message : String(error),
+    stack: error instanceof Error ? error.stack || "" : ""
+  });
+});
+
+process.on("unhandledRejection", (reason) => {
+  appendHostLog("error", "unhandled_rejection", {
+    error: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack || "" : ""
+  });
+});
+
+appendHostLog("info", "host_started", {
+  hostVersion: HOST_VERSION,
+  node: process.version,
+  runtimeDir: HOST_RUNTIME_DIR
+});
+
 readNativeMessages(async (message) => {
   try {
-    const response = await handleMessage(message);
+    const response = await handleMessageWithLogging(message);
     writeNativeMessage(response);
   } catch (error) {
     writeNativeMessage({

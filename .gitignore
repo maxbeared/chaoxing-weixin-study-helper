@@ -1,6 +1,7 @@
 node_modules/
 native-host/node_modules/
 native-host/.state/
+native-host/*.generated.json
 page-*.png
 *-inspect.png
 inspect-*.png

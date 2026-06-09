@@ -21,7 +21,7 @@
 
     <section class="panel">
       <div class="row">
-        <label for="targetId">微信目标 ID</label>
+        <label for="targetId">微信目标 ID（可选）</label>
         <input id="targetId" placeholder="例如 xxx@im.wechat">
       </div>
       <div class="row">
@@ -85,6 +85,15 @@
         <button id="waitLoginBtn" class="primary">我已扫码，检查登录</button>
       </div>
       <pre id="log"></pre>
+    </section>
+
+    <section class="panel">
+      <div class="actions">
+        <button id="viewLogsBtn">查看日志</button>
+        <button id="downloadLogsBtn">下载日志</button>
+        <button id="clearLogsBtn">清空日志</button>
+      </div>
+      <textarea id="logsView" class="logs-view" readonly placeholder="运行日志会显示在这里"></textarea>
     </section>
   </main>
   <script src="popup.js"></script>

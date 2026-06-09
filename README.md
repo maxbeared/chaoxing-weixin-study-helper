@@ -6,24 +6,83 @@
 
 - `extension/`：Manifest V3 浏览器扩展。
 - `native-host/`：本地 Node.js helper，负责微信 iLink 登录、消息发送、图片上传、大模型调用和 `font-cxsecret` 字体解码。
+- `install.cmd`：Windows 一键安装入口。
+- `install.sh`：macOS/Linux 安装入口。
+- `scripts/install.ps1`：注册 Native Messaging host、打开扩展管理页；发布包带 native host 二进制时不需要 Node/npm。
 - `scripts/register-native-host.ps1`：Windows 下注册 Chrome/Edge Native Messaging host 的脚本。
 
 ## 安装
 
-1. 安装 Node.js 22 或更新版本。
-2. 打开 Chrome/Edge 扩展管理页，启用开发者模式，加载 `extension/` 目录。
-3. 复制扩展 ID。
-4. 注册本地 helper：
+### 发布包安装（推荐）
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\register-native-host.ps1 -ExtensionId <你的扩展ID>
+发布包如果已经包含 `native-host/dist/<平台-架构>/chaoxing-weixin-native-host`，用户电脑不需要安装 Node.js、npm 或其他运行时依赖。
+
+Windows：
+
+1. 双击根目录的 `install.cmd`。
+2. 脚本会注册 Chrome/Edge Native Messaging host、打开扩展管理页，并把 `extension/` 路径复制到剪贴板。
+3. 在 Chrome/Edge 扩展管理页启用“开发者模式”，点击“加载已解压的扩展程序”，选择 `extension/` 目录。
+
+macOS/Linux：
+
+```sh
+sh ./install.sh
 ```
 
-Edge 使用：
+然后在 Chrome/Edge 扩展管理页启用“开发者模式”，点击“加载已解压的扩展程序”，选择脚本输出的 `extension/` 目录。
+
+> Chrome/Edge 不允许普通脚本静默加载本地未打包扩展，所以最后一步仍需要在扩展管理页点一次“加载已解压”。扩展 ID 已固定，用户不再需要复制 ID 或手动注册 helper。
+
+只注册 Chrome：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\register-native-host.ps1 -ExtensionId <你的扩展ID> -Edge
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Browser Chrome
 ```
+
+只注册 Edge：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Browser Edge
+```
+
+macOS/Linux 对应命令：
+
+```sh
+sh ./install.sh --browser chrome
+sh ./install.sh --browser edge
+```
+
+### 源码安装
+
+如果源码包里没有 `native-host/dist/...` 二进制，安装脚本会自动回退到开发模式，此时需要先安装 Node.js 22 或更新版本。
+
+### 手动注册
+
+一般不需要手动注册。如果你要指定自己的扩展 ID，可以使用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\register-native-host.ps1 -ExtensionId <你的扩展ID> -Browser Chrome
+```
+
+## 构建无依赖发布包
+
+在有 Node.js 22 的构建机上执行：
+
+```sh
+cd native-host
+npm install
+npm run build:native
+```
+
+构建完成后，把项目根目录连同 `extension/`、`native-host/dist/`、`install.cmd`、`install.sh` 一起打包发布。用户使用这个发布包安装时不需要 Node/npm。
+
+当前构建脚本会生成：
+
+- `native-host/dist/win-x64/chaoxing-weixin-native-host.exe`
+- `native-host/dist/win-arm64/chaoxing-weixin-native-host.exe`
+- `native-host/dist/macos-x64/chaoxing-weixin-native-host`
+- `native-host/dist/macos-arm64/chaoxing-weixin-native-host`
+- `native-host/dist/linux-x64/chaoxing-weixin-native-host`
 
 ## 使用
 
@@ -33,6 +92,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\register-native-host.ps1 -Ext
 4. 在弹窗中配置大模型 API，或通过微信远程配置。
 5. 打开超星课程页面。扩展会跨 iframe 监控视频和习题页面。
 6. 检测到习题时，扩展会把题目文本和截图发送到微信。
+7. 扩展只在超星/学银在线相关页面注入；切换到其他标签页后，课程页中的视频监控、远程作答和提交仍会继续处理。
+
+不绑定微信目标 ID 也可以使用本地功能：视频监控、自动下一节、自动播放、题目面板、手动作答和本地错题记录会继续运行；微信通知、题图发送和远程作答命令会自动跳过。
 
 ## 微信命令
 
@@ -49,6 +111,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\register-native-host.ps1 -Ext
 ## 功能
 
 - 视频暂停、结束、卡住、缓冲等待时发送微信通知。
+- 已绑定微信目标时，自动切换下一节、切换失败和扩展运行异常会发送微信通知。
+- 弹窗支持查看、下载和清空运行日志；native host 日志保存在 `.state/logs/runtime.log` 和 `.state/logs/error.log`。
 - 视频结束后可自动点击下一节，并尝试自动播放下一节视频。
 - 如果视频已经播放完成，且当前没有微信 `提交` 命令正在等待结果，即使题目答案还只是发送到微信、尚未提交，也会继续进入下一节。
 - 微信远程作答带基础校验：
@@ -67,6 +131,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\register-native-host.ps1 -Ext
 
 - 微信目标 ID 必须是 iLink 能识别的目标，通常来自收到的微信消息上下文，不是普通昵称。
 - 截图依赖浏览器标签页可见；窗口最小化或被遮挡时，可能截到空白或过期画面。
+- 当课程标签页不在前台时，题图会改用题目 DOM 生成的后台截图；少数跨域图片可能无法完整渲染。
 - 大模型解析只用于学习辅助。Prompt 会要求模型讲考点和思路，不直接选择答案或完成作业。
 - 扩展只填入你明确回复的选项，只在收到明确 `提交` 后提交。
 - 错题库是本地浏览器数据，本项目不会同步这些记录。

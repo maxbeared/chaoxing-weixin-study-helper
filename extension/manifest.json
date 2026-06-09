@@ -3,6 +3,7 @@
   "name": "Chaoxing Weixin Study Helper",
   "description": "Monitor Chaoxing course videos, support Weixin remote answers, explanations, screenshots, and wrong-question tracking.",
   "version": "0.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwnLfRrpDfs73gJEdOYS6P+RwwPiYU0RtqkNdBuyVcdAJy/o8byOLC5rps77R8xoFu8Wly63Kfi83DfJ1iV+WRP5U0WEsoDdiFuuav6SA9lb4GfxRTrkLZlbtZVU+c5svuEkqwZprLStOphFK4IZDEETAYyI3NXWEL6KJAyl9RWW9JcwMqUnsgFCMyvEEGHehoa3VCJYQfqW30/7yx/zZrWXH8ldGUxdZ/JuIQ7F8ATLIhrHWiBqrC1fvI/ZO4jwMIl2I4elU2a2QVWRSClMj9QcRB4MeoUK0xlRWlPSt2ET4tXeSCm4N+cIosuI5p+jNB0sWnTvjDE+PaHN0V57N1wIDAQAB",
   "permissions": [
     "activeTab",
     "nativeMessaging",
@@ -11,7 +12,12 @@
     "tabs"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "*://chaoxing.com/*",
+    "*://*.chaoxing.com/*",
+    "*://xueyinonline.com/*",
+    "*://*.xueyinonline.com/*",
+    "*://xuexi365.com/*",
+    "*://*.xuexi365.com/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -19,7 +25,12 @@
   "content_scripts": [
     {
       "matches": [
-        "<all_urls>"
+        "*://chaoxing.com/*",
+        "*://*.chaoxing.com/*",
+        "*://xueyinonline.com/*",
+        "*://*.xueyinonline.com/*",
+        "*://xuexi365.com/*",
+        "*://*.xuexi365.com/*"
       ],
       "js": [
         "content.js"
