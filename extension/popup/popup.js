@@ -255,7 +255,7 @@ async function startLogin() {
   $("qrImage").src = response.qrDataUrl;
   $("qrMessage").textContent = response.message || "请用手机微信扫码确认";
   $("qrWrap").classList.remove("hidden");
-  log("二维码已生成。扫码后点“我已扫码，检查登录”。");
+  log("二维码已生成。扫码后点“我已扫码，检查登录”。登录成功后，用接收通知的微信给助手发一句话，再点“读取最近消息”自动绑定目标。");
 }
 
 async function waitLogin() {
@@ -284,6 +284,8 @@ async function waitLogin() {
     $("accountId").value = response.accountId;
     await saveSettings();
     $("statusText").textContent = "微信已连接";
+    log("微信已连接。现在用接收通知的微信给助手发一句话，然后点“读取最近消息”，系统会自动填入微信目标 ID。");
+    return;
   }
   log(response);
 }
@@ -292,7 +294,7 @@ async function testSend() {
   await saveSettings();
   const settings = collectSettings();
   if (!settings.targetId) {
-    log("请先填写微信目标 ID。");
+    log("还没有微信目标 ID。请先用接收通知的微信给助手发一句话，然后点“读取最近消息”，系统会自动填入。");
     return;
   }
   const response = await nativeSend({
@@ -303,6 +305,18 @@ async function testSend() {
     text: `测试通知\n来自浏览器扩展\n${new Date().toLocaleString()}`
   });
   log(response);
+}
+
+async function selectMessageTarget(message, reason = "manual") {
+  const target = message?.groupId || message?.fromUserId || "";
+  if (!target) return false;
+  $("targetId").value = target;
+  await chrome.storage.sync.set({
+    targetId: target,
+    lastContextToken: message.contextToken || ""
+  });
+  log(reason === "auto" ? `已自动填入微信目标 ID：${target}` : `已填入目标：${target}`);
+  return true;
 }
 
 function renderMessages(messages) {
@@ -325,12 +339,7 @@ function renderMessages(messages) {
     text.textContent = message.text || "(非文本消息)";
     button.append(id, text);
     button.addEventListener("click", async () => {
-      $("targetId").value = target;
-      await chrome.storage.sync.set({
-        targetId: target,
-        lastContextToken: message.contextToken || ""
-      });
-      log(`已填入目标：${target}`);
+      await selectMessageTarget(message);
     });
     wrap.appendChild(button);
   }
@@ -344,7 +353,14 @@ async function pollMessages() {
     accountId: settings.accountId || undefined,
     timeoutMs: 35000
   });
-  if (response?.ok) renderMessages(response.messages);
+  if (response?.ok) {
+    renderMessages(response.messages);
+    const candidates = (response.messages || []).filter((message) => message.groupId || message.fromUserId);
+    if (!$("targetId").value.trim() && candidates.length) {
+      await selectMessageTarget(candidates[candidates.length - 1], "auto");
+      return;
+    }
+  }
   log(response);
 }
 

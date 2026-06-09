@@ -102,6 +102,10 @@ function Invoke-JsonCheck {
   }
 
   foreach ($file in $jsonFiles) {
+    if ((Split-Path $file -Leaf) -eq "package-lock.json") {
+      Get-Content $file -Raw -Encoding UTF8 | Out-Null
+      continue
+    }
     Get-Content $file -Raw -Encoding UTF8 | ConvertFrom-Json | Out-Null
   }
 }

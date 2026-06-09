@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\package.ps1" %*
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\package.ps1" -BuildWinX64 %*
 set "PACKAGE_EXIT_CODE=%ERRORLEVEL%"
 
 echo.

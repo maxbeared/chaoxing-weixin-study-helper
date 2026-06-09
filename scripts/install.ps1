@@ -2,7 +2,9 @@ param(
   [ValidateSet("Chrome", "Edge", "All")]
   [string]$Browser = "All",
 
-  [switch]$SkipOpen
+  [switch]$SkipOpen,
+
+  [switch]$AllowSourceInstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -104,7 +106,19 @@ if ($hostPath) {
   Write-Host "Registering browser native messaging..."
   & $registerScript -Browser $Browser -HostPath $hostPath -SkipNpmInstall
 } else {
-  Write-Host "Packaged native host was not found. Falling back to development mode with Node.js."
+  if (-not $AllowSourceInstall) {
+    throw @"
+Packaged native host was not found.
+
+This looks like a source package, not a release package. Use the release zip that contains:
+  native-host\dist\win-<arch>\chaoxing-weixin-native-host.exe
+
+Developers can still run source-mode install explicitly:
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1 -AllowSourceInstall
+"@
+  }
+
+  Write-Host "Packaged native host was not found. Source install was explicitly enabled; falling back to development mode with Node.js."
   Test-NodeVersion
   Test-Tool -Name "npm" -InstallHint "Install Node.js 22 or newer, then run install.cmd again: https://nodejs.org/"
   Write-Host "Installing native host dependencies and registering browser native messaging..."
