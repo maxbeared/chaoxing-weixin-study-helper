@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>超星微信学习助手</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>超星学习助手</h1>
+        <p id="statusText">未检查连接</p>
+      </div>
+      <label class="switch" title="启用或停用监控">
+        <input id="enabled" type="checkbox">
+        <span></span>
+      </label>
+    </header>
+
+    <section class="panel">
+      <div class="row">
+        <label for="targetId">微信目标 ID</label>
+        <input id="targetId" placeholder="例如 xxx@im.wechat">
+      </div>
+      <div class="row">
+        <label for="accountId">发送账号 ID</label>
+        <input id="accountId" placeholder="留空自动选择">
+      </div>
+      <div class="grid">
+        <label><input id="notifyOnPause" type="checkbox"> 暂停</label>
+        <label><input id="notifyOnEnded" type="checkbox"> 结束</label>
+        <label><input id="notifyOnStalled" type="checkbox"> 卡住</label>
+      </div>
+      <div class="numbers">
+        <label>暂停延迟 <input id="pauseDebounceSeconds" type="number" min="0" max="60"> 秒</label>
+        <label>冷却 <input id="cooldownSeconds" type="number" min="0" max="3600"> 秒</label>
+      </div>
+      <label class="check"><input id="includeUrl" type="checkbox"> 通知中包含页面链接</label>
+      <label class="check"><input id="autoNextOnEnded" type="checkbox"> 视频结束后自动点击下一节</label>
+      <label class="check"><input id="autoPlayNextVideo" type="checkbox"> 下一节加载后自动播放</label>
+      <button id="saveBtn" class="primary">保存设置</button>
+    </section>
+
+    <section class="panel">
+      <div class="row">
+        <label for="llmPreset">大模型预置</label>
+        <select id="llmPreset">
+          <option value="custom">自定义 OpenAI-compatible</option>
+          <option value="minimax">MiniMax Token Plan</option>
+        </select>
+      </div>
+      <div class="row">
+        <label for="llmEndpoint">大模型接口</label>
+        <input id="llmEndpoint" placeholder="OpenAI-compatible /chat/completions URL">
+      </div>
+      <div class="row">
+        <label for="llmModel">模型</label>
+        <input id="llmModel" placeholder="例如 gpt-4o-mini 或你的模型名">
+      </div>
+      <p id="llmPresetNote" class="hint"></p>
+      <div class="row">
+        <label for="llmApiKey">API Key</label>
+        <input id="llmApiKey" type="password" placeholder="留空则不修改已保存 Key">
+      </div>
+      <button id="saveLlmBtn" class="wide">保存大模型设置</button>
+      <div id="modelUpdate" class="model-update hidden">
+        <div id="modelUpdateText"></div>
+        <button id="switchModelBtn" class="wide">切换到最新模型</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="actions">
+        <button id="statusBtn">检查本地服务</button>
+        <button id="loginBtn">生成二维码</button>
+        <button id="testBtn">测试发送</button>
+      </div>
+      <button id="pollBtn" class="wide">读取最近消息</button>
+      <div id="messages" class="messages"></div>
+      <div id="qrWrap" class="qr hidden">
+        <img id="qrImage" alt="微信登录二维码">
+        <p id="qrMessage"></p>
+        <button id="waitLoginBtn" class="primary">我已扫码，检查登录</button>
+      </div>
+      <pre id="log"></pre>
+    </section>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

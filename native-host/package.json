@@ -1,0 +1,17 @@
+{
+  "name": "chaoxing-weixin-study-helper-native-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Native Messaging host for Chaoxing Weixin study helper.",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "typr.js": "^1.0.0"
+  },
+  "scripts": {
+    "start": "node host.mjs"
+  }
+}

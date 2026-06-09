@@ -1,0 +1,9 @@
+{
+  "name": "com.audio_check.weixin_monitor",
+  "description": "Chaoxing Weixin Study Helper native host",
+  "path": "__HOST_PATH__",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://__EXTENSION_ID__/"
+  ]
+}
