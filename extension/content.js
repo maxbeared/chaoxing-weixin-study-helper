@@ -16,6 +16,7 @@
   const lastProgress = new WeakMap();
   const observed = new WeakSet();
   const nextClicked = new WeakSet();
+  const endedHandled = new WeakSet();
   const AUTOPLAY_KEY = "audioCheckAutoPlayNextUntil";
   const NEXT_SELECTORS = [
     "#prevNextFocusNext",
@@ -209,6 +210,7 @@
 
   function clickNextLesson(video) {
     if (!settings.enabled || !settings.autoNextOnEnded || nextClicked.has(video)) return;
+    if (hasRemoteSubmitPending()) return;
     nextClicked.add(video);
     markAutoPlayWindow();
 
@@ -252,10 +254,27 @@
 
   function onEnded(video) {
     clearPauseTimer(video);
+    if (endedHandled.has(video)) return;
+    endedHandled.add(video);
     if (settings.notifyOnEnded) {
       sendPlaybackEvent(video, "ended");
     }
     clickNextLesson(video);
+  }
+
+  function isVideoCompleted(video) {
+    if (!(video instanceof HTMLVideoElement)) return false;
+    if (video.ended) return true;
+    const duration = Number(video.duration);
+    const currentTime = Number(video.currentTime);
+    return Number.isFinite(duration) && duration > 0 &&
+      Number.isFinite(currentTime) && currentTime >= Math.max(0, duration - 0.5);
+  }
+
+  function checkAlreadyCompletedVideo(video) {
+    if (isVideoCompleted(video)) {
+      onEnded(video);
+    }
   }
 
   function onStalled(video, reason) {
@@ -282,11 +301,15 @@
     video.addEventListener("timeupdate", () => lastProgress.set(video, Date.now()), true);
     video.addEventListener("pause", () => onPause(video), true);
     video.addEventListener("ended", () => onEnded(video), true);
+    video.addEventListener("loadedmetadata", () => checkAlreadyCompletedVideo(video), true);
+    video.addEventListener("durationchange", () => checkAlreadyCompletedVideo(video), true);
     video.addEventListener("loadeddata", () => tryPlayVideo(video), true);
     video.addEventListener("canplay", () => tryPlayVideo(video), true);
     video.addEventListener("stalled", () => onStalled(video, "stalled"), true);
     video.addEventListener("waiting", () => onStalled(video, "waiting"), true);
     tryPlayVideo(video);
+    setTimeout(() => checkAlreadyCompletedVideo(video), 300);
+    setTimeout(() => checkAlreadyCompletedVideo(video), 2000);
   }
 
   function scanVideos(root = document) {
@@ -984,6 +1007,15 @@
       // Ignore storage restrictions.
     }
     return false;
+  }
+
+  function hasRemoteSubmitPending() {
+    try {
+      const keys = [remoteSubmitPendingKey(), remoteSubmitPendingGlobalKey()];
+      return keys.some((key) => Date.now() <= Number(sessionStorage.getItem(key) || "0"));
+    } catch {
+      return false;
+    }
   }
 
   function wrongResultRecordedKey() {

@@ -50,6 +50,7 @@ Remote Weixin commands:
 
 - Video notifications for pause, ended, stalled, and waiting states.
 - Optional next-lesson click and autoplay attempts after a video ends.
+- If a video is already completed and no Weixin `提交` command is pending, the extension can still move to the next lesson even when quiz answers have only been sent to Weixin.
 - Weixin remote answer filling with validation:
   - single choice accepts one option;
   - multiple choice requires at least two options;
