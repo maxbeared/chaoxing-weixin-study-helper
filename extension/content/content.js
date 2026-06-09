@@ -7,7 +7,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
-scanVideos();
+scanVideosDeep();
+scanCompletedJobMarkers();
 watchManualSubmitClicks();
 ensureQuizPanel();
 scheduleWrongQuestionScan();
@@ -15,12 +16,18 @@ const observer = new MutationObserver((mutations) => {
   for (const mutation of mutations) {
     for (const node of mutation.addedNodes) {
       if (node.nodeType === Node.ELEMENT_NODE) {
-        scanVideos(node);
+        scanVideosDeep(node);
       }
     }
   }
+  scanVideosDeep();
+  scanCompletedJobMarkers();
   ensureQuizPanel();
   scheduleWrongQuestionScan();
   clickNextConfirmIfShown();
 });
 observer.observe(document.documentElement, { childList: true, subtree: true });
+setInterval(() => {
+  scanVideosDeep();
+  scanCompletedJobMarkers();
+}, 3000);

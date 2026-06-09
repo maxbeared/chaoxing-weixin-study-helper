@@ -14,13 +14,20 @@ let videoSeq = 0;
 const timers = new WeakMap();
 const lastProgress = new WeakMap();
 const observed = new WeakSet();
+const playedVideos = new WeakSet();
 const nextClicked = new WeakSet();
 const endedHandled = new WeakSet();
+let playedSinceNavigation = false;
+let jobCompleteAutoNextStarted = false;
 const AUTOPLAY_KEY = "audioCheckAutoPlayNextUntil";
+const AUTO_NEXT_CLAIM_KEY = "audioCheckAutoNextClaim";
 const NEXT_SELECTORS = [
   "#prevNextFocusNext",
+  "#prevNextFocusNext a",
+  ".prev_next.next a",
   ".prev_next.next",
   ".jb_btn.prev_next.next",
+  ".jb_btn.prev_next.next a",
   "[role='button'][onclick*='PCount.next']",
   "[onclick*='PCount.next']"
 ];

@@ -7,23 +7,76 @@ function isVisible(element) {
   return rect.width > 0 && rect.height > 0;
 }
 
+function normalizeUiText(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function isNextLikeElement(element) {
+  if (!(element instanceof HTMLElement)) return false;
+  const onclick = String(element.getAttribute("onclick") || "");
+  if (/PCount\.next/i.test(onclick)) return true;
+  const text = normalizeUiText([
+    element.innerText,
+    element.textContent,
+    element.getAttribute("title"),
+    element.getAttribute("aria-label"),
+    element.getAttribute("value")
+  ].filter(Boolean).join(" "));
+  if (/上一节|上一章|上一个|上一课|prev|previous/i.test(text)) return false;
+  if (/下一节|下一章|下一个|下一课|next/i.test(text)) return true;
+  return element.id === "prevNextFocusNext";
+}
+
 function findNextButton() {
   for (const selector of NEXT_SELECTORS) {
     const candidates = Array.from(document.querySelectorAll(selector));
     const visible = candidates.find(isVisible);
     if (visible) return visible;
   }
-  return null;
+  const fallbackCandidates = Array.from(document.querySelectorAll("a, button, [role='button'], input[type='button'], input[type='submit'], [onclick]"));
+  return fallbackCandidates.find((item) => isVisible(item) && isNextLikeElement(item)) || null;
+}
+
+function hasPreviousLessonButton() {
+  return Array.from(document.querySelectorAll("a, button, [role='button'], input[type='button'], input[type='submit'], [onclick], #prevNextFocusPrev"))
+    .some((element) => {
+      if (!isVisible(element)) return false;
+      const text = normalizeUiText([
+        element.innerText,
+        element.textContent,
+        element.getAttribute("title"),
+        element.getAttribute("aria-label"),
+        element.getAttribute("value"),
+        element.getAttribute("onclick")
+      ].filter(Boolean).join(" "));
+      return /上一节|上一章|上一个|上一课|prev|previous|PCount\.pre/i.test(text) ||
+        element.id === "prevNextFocusPrev";
+    });
+}
+
+function notifyLastLesson(response = {}) {
+  writeRuntimeLog("info", "auto_next_last_lesson", response);
+  sendExtensionNotice(
+    "next_lesson",
+    "已到最后一节",
+    "没有找到可用的下一节按钮，当前课程可能已经到最后一节。",
+    { dedupeKey: `last-lesson:${location.href}`, cooldownSeconds: 60 }
+  );
+}
+
+function isTaskTipShown() {
+  return Array.from(document.querySelectorAll(".jobLimitTip, .popWord2, .popDiv, .popBottom"))
+    .some((item) => normalizeUiText(item.innerText).includes("当前章节还有任务点未完成"));
 }
 
 function findNextConfirmButton() {
-  const hasTaskTip = Array.from(document.querySelectorAll(".jobLimitTip, .popWord2"))
-    .some((item) => cleanText(item.innerText).includes("当前章节还有任务点未完成"));
+  const hasTaskTip = isTaskTipShown();
   for (const selector of NEXT_CONFIRM_SELECTORS) {
     const candidates = Array.from(document.querySelectorAll(selector));
     const visible = candidates.find(isVisible);
-    if (visible && (hasTaskTip || visible.classList.contains("nextChapter"))) return visible;
+    if (visible && (hasTaskTip || visible.classList.contains("nextChapter") || isNextLikeElement(visible))) return visible;
   }
+  if (hasTaskTip) return findNextButton();
   return null;
 }
 
@@ -35,6 +88,90 @@ function clickNextConfirmIfShown() {
   button.click();
   scheduleAutoPlayAttempts();
   return true;
+}
+
+function getAutoNextPageKey() {
+  try {
+    return top.location.href || location.href;
+  } catch {
+    return location.href;
+  }
+}
+
+function claimAutoNext(reason) {
+  try {
+    const now = Date.now();
+    const pageKey = getAutoNextPageKey();
+    const value = sessionStorage.getItem(AUTO_NEXT_CLAIM_KEY);
+    if (value) {
+      const parsed = JSON.parse(value);
+      if (parsed?.pageKey === pageKey && now - Number(parsed.ts || 0) < 10_000) {
+        writeRuntimeLog("info", "auto_next_claim_skipped", {
+          reason,
+          claimedBy: parsed.reason || "",
+          ageMs: now - Number(parsed.ts || 0)
+        });
+        return false;
+      }
+    }
+    sessionStorage.setItem(AUTO_NEXT_CLAIM_KEY, JSON.stringify({ pageKey, reason, ts: now }));
+  } catch {
+    // If storage is unavailable, continue with the local in-memory guards.
+  }
+  return true;
+}
+
+function getCompletedJobMarkers(doc = document) {
+  return Array.from(doc.querySelectorAll(
+    ".ans-job-icon-clear[aria-label='任务点已完成'], .ans-job-icon-clear[aria-label*='已完成']"
+  )).filter(isVisible);
+}
+
+function scanCompletedJobMarkers(root = document, seen = new WeakSet(), depth = 0) {
+  if (!settings.enabled || !settings.autoNextOnEnded || jobCompleteAutoNextStarted) return;
+  if (!root || depth > 4) return;
+
+  let doc = null;
+  if (root instanceof Document) {
+    doc = root;
+  } else if (root instanceof HTMLIFrameElement || root instanceof HTMLFrameElement) {
+    try {
+      doc = root.contentWindow?.document || null;
+    } catch {
+      doc = null;
+    }
+  } else {
+    doc = root.ownerDocument || null;
+  }
+
+  if (!doc || seen.has(doc)) return;
+  seen.add(doc);
+
+  const markers = getCompletedJobMarkers(doc);
+  if (markers.length > 0) {
+    if (!claimAutoNext("completed-job-marker")) return;
+    jobCompleteAutoNextStarted = true;
+    writeRuntimeLog("info", "auto_next_job_marker_completed", {
+      frameUrl: doc.location?.href || "",
+      markerCount: markers.length
+    });
+    sendExtensionNotice(
+      "next_lesson",
+      "任务点已完成，准备进入下一节",
+      "检测到页面任务点已完成标记，将自动切换到下一节。",
+      { dedupeKey: `job-marker:${location.href}`, cooldownSeconds: 10 }
+    );
+    clickNextLesson({ marker: "completed-job", noticeSent: true });
+    return;
+  }
+
+  doc.querySelectorAll("iframe, frame").forEach((frame) => {
+    try {
+      scanCompletedJobMarkers(frame, seen, depth + 1);
+    } catch {
+      // Cross-origin and sandboxed frames are handled by their own content scripts when matched.
+    }
+  });
 }
 
 function markAutoPlayWindow() {
@@ -120,15 +257,17 @@ function scheduleAutoPlayAttempts() {
 
 function scheduleNextConfirmAttempts() {
   if (!settings.enabled || !settings.autoNextOnEnded) return;
-  for (const delay of [200, 500, 1000, 1800, 3000, 5000]) {
+  for (const delay of [200, 500, 1000, 1800, 3000, 5000, 8000, 12000]) {
     setTimeout(() => clickNextConfirmIfShown(), delay);
   }
 }
 
 async function clickNextLesson(video) {
-  if (!settings.enabled || !settings.autoNextOnEnded || nextClicked.has(video)) return;
+  if (!settings.enabled || !settings.autoNextOnEnded) return;
+  if (video && typeof video === "object" && nextClicked.has(video)) return;
   if (hasRemoteSubmitPending()) return;
-  nextClicked.add(video);
+  if (video && typeof video === "object") nextClicked.add(video);
+  const noticeAlreadySent = Boolean(video?.noticeSent);
   markAutoPlayWindow();
 
   const button = findNextButton();
@@ -137,12 +276,14 @@ async function clickNextLesson(video) {
       writeRuntimeLog("info", "auto_next_clicking", {
         selector: button.id ? `#${button.id}` : button.className || button.tagName
       });
-      sendExtensionNotice(
-        "next_lesson",
-        "正在切换下一节",
-        `即将点击页面中的下一节按钮。\n选择器：${button.id ? `#${button.id}` : button.className || button.tagName}`,
-        { dedupeKey: `next:${location.href}`, cooldownSeconds: 10 }
-      );
+      if (!noticeAlreadySent) {
+        sendExtensionNotice(
+          "next_lesson",
+          "正在切换下一节",
+          `即将点击页面中的下一节按钮。\n选择器：${button.id ? `#${button.id}` : button.className || button.tagName}`,
+          { dedupeKey: `next:${location.href}`, cooldownSeconds: 10 }
+        );
+      }
       button.click();
       scheduleNextConfirmAttempts();
       scheduleAutoPlayAttempts();
@@ -168,13 +309,19 @@ async function clickNextLesson(video) {
   });
   if (response?.ok) {
     writeRuntimeLog("info", "auto_next_clicked_in_frames", response);
-    sendExtensionNotice(
-      "next_lesson",
-      "正在切换下一节",
-      `已在页面所有 frame 中触发下一节按钮。${response.selector ? `\n选择器：${response.selector}` : ""}`,
-      { dedupeKey: `next:${location.href}`, cooldownSeconds: 10 }
-    );
+    if (!noticeAlreadySent) {
+      sendExtensionNotice(
+        "next_lesson",
+        "正在切换下一节",
+        `已在页面所有 frame 中触发下一节按钮。${response.selector ? `\n选择器：${response.selector}` : ""}`,
+        { dedupeKey: `next:${location.href}`, cooldownSeconds: 10 }
+      );
+    }
   } else {
+    if (response?.lastLesson || hasPreviousLessonButton()) {
+      notifyLastLesson(response || {});
+      return;
+    }
     writeRuntimeLog("error", "auto_next_failed", response || { error: "No response" });
     sendExtensionNotice(
       "runtime_error",
@@ -197,6 +344,10 @@ function clearPauseTimer(video) {
 
 function onPause(video) {
   clearPauseTimer(video);
+  if (isVideoCompleted(video)) {
+    onEnded(video);
+    return;
+  }
   if (!settings.notifyOnPause || video.ended) return;
   const delay = Math.max(0, Number(settings.pauseDebounceSeconds) || 0) * 1000;
   const timer = setTimeout(() => {
@@ -211,6 +362,15 @@ function onPause(video) {
 function onEnded(video) {
   clearPauseTimer(video);
   if (endedHandled.has(video)) return;
+  if (!playedVideos.has(video)) {
+    writeRuntimeLog("info", "auto_next_skipped_unplayed_video", {
+      currentTime: Number.isFinite(video.currentTime) ? video.currentTime : 0,
+      duration: Number.isFinite(video.duration) ? video.duration : 0,
+      ended: video.ended
+    });
+    endedHandled.add(video);
+    return;
+  }
   endedHandled.add(video);
   if (settings.notifyOnEnded) {
     sendPlaybackEvent(video, "ended");
@@ -220,11 +380,7 @@ function onEnded(video) {
 
 function isVideoCompleted(video) {
   if (!(video instanceof HTMLVideoElement)) return false;
-  if (video.ended) return true;
-  const duration = Number(video.duration);
-  const currentTime = Number(video.currentTime);
-  return Number.isFinite(duration) && duration > 0 &&
-    Number.isFinite(currentTime) && currentTime >= Math.max(0, duration - 0.5);
+  return video.ended;
 }
 
 function checkAlreadyCompletedVideo(video) {
@@ -249,12 +405,25 @@ function watchVideo(video) {
   video.setAttribute(VIDEO_MARK, String(++videoSeq));
   lastProgress.set(video, Date.now());
 
-  video.addEventListener("play", () => clearPauseTimer(video), true);
+  video.addEventListener("play", () => {
+    playedVideos.add(video);
+    playedSinceNavigation = true;
+    clearPauseTimer(video);
+  }, true);
   video.addEventListener("playing", () => {
+    playedVideos.add(video);
+    playedSinceNavigation = true;
     clearPauseTimer(video);
     lastProgress.set(video, Date.now());
   }, true);
-  video.addEventListener("timeupdate", () => lastProgress.set(video, Date.now()), true);
+  video.addEventListener("timeupdate", () => {
+    if (!video.ended && Number(video.currentTime) > 1) {
+      playedVideos.add(video);
+      playedSinceNavigation = true;
+    }
+    lastProgress.set(video, Date.now());
+    checkAlreadyCompletedVideo(video);
+  }, true);
   video.addEventListener("pause", () => onPause(video), true);
   video.addEventListener("ended", () => onEnded(video), true);
   video.addEventListener("loadedmetadata", () => checkAlreadyCompletedVideo(video), true);
@@ -263,9 +432,20 @@ function watchVideo(video) {
   video.addEventListener("canplay", () => tryPlayVideo(video), true);
   video.addEventListener("stalled", () => onStalled(video, "stalled"), true);
   video.addEventListener("waiting", () => onStalled(video, "waiting"), true);
+  if (!video.paused && !video.ended) {
+    playedVideos.add(video);
+    playedSinceNavigation = true;
+  }
   tryPlayVideo(video);
   setTimeout(() => checkAlreadyCompletedVideo(video), 300);
   setTimeout(() => checkAlreadyCompletedVideo(video), 2000);
+  const completionInterval = setInterval(() => {
+    if (!document.contains(video)) {
+      clearInterval(completionInterval);
+      return;
+    }
+    checkAlreadyCompletedVideo(video);
+  }, 3000);
 }
 
 function scanVideos(root = document) {
@@ -274,5 +454,34 @@ function scanVideos(root = document) {
     return;
   }
   root.querySelectorAll?.("video").forEach(watchVideo);
+}
+
+function scanVideosDeep(root = document, seen = new WeakSet(), depth = 0) {
+  if (!root || depth > 4) return;
+  let doc = null;
+  if (root instanceof Document) {
+    doc = root;
+  } else if (root instanceof HTMLIFrameElement || root instanceof HTMLFrameElement) {
+    try {
+      doc = root.contentWindow?.document || null;
+    } catch {
+      doc = null;
+    }
+  } else {
+    scanVideos(root);
+    doc = root.ownerDocument || null;
+  }
+
+  if (!doc || seen.has(doc)) return;
+  seen.add(doc);
+  scanVideos(doc);
+
+  doc.querySelectorAll("iframe, frame").forEach((frame) => {
+    try {
+      scanVideosDeep(frame, seen, depth + 1);
+    } catch {
+      // Cross-origin and sandboxed frames are handled by their own content scripts when matched.
+    }
+  });
 }
 

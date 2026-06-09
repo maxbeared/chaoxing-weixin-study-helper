@@ -345,8 +345,11 @@ async function clickNextInAllFrames(sender) {
     func: () => {
       const selectors = [
         "#prevNextFocusNext",
+        "#prevNextFocusNext a",
+        ".prev_next.next a",
         ".prev_next.next",
         ".jb_btn.prev_next.next",
+        ".jb_btn.prev_next.next a",
         "[role='button'][onclick*='PCount.next']",
         "[onclick*='PCount.next']"
       ];
@@ -362,14 +365,62 @@ async function clickNextInAllFrames(sender) {
         const rect = element.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
       };
+      const normalizeText = (text) => String(text || "").replace(/\s+/g, " ").trim();
+      const isNextLikeElement = (element) => {
+        if (!(element instanceof HTMLElement)) return false;
+        const onclick = String(element.getAttribute("onclick") || "");
+        if (/PCount\.next/i.test(onclick)) return true;
+        const text = normalizeText([
+          element.innerText,
+          element.textContent,
+          element.getAttribute("title"),
+          element.getAttribute("aria-label"),
+          element.getAttribute("value")
+        ].filter(Boolean).join(" "));
+        if (/上一节|上一章|上一个|上一课|prev|previous/i.test(text)) return false;
+        if (/下一节|下一章|下一个|下一课|next/i.test(text)) return true;
+        return element.id === "prevNextFocusNext";
+      };
+      const findNextButton = () => {
+        for (const selector of selectors) {
+          const button = Array.from(document.querySelectorAll(selector)).find(isVisible);
+          if (button) return { button, selector };
+        }
+        const fallback = Array.from(document.querySelectorAll("a, button, [role='button'], input[type='button'], input[type='submit'], [onclick]"))
+          .find((item) => isVisible(item) && isNextLikeElement(item));
+        return fallback ? { button: fallback, selector: "text-or-attribute-next" } : null;
+      };
+      const hasPreviousLessonButton = () => {
+        return Array.from(document.querySelectorAll("a, button, [role='button'], input[type='button'], input[type='submit'], [onclick], #prevNextFocusPrev"))
+          .some((element) => {
+            if (!isVisible(element)) return false;
+            const text = normalizeText([
+              element.innerText,
+              element.textContent,
+              element.getAttribute("title"),
+              element.getAttribute("aria-label"),
+              element.getAttribute("value"),
+              element.getAttribute("onclick")
+            ].filter(Boolean).join(" "));
+            return /上一节|上一章|上一个|上一课|prev|previous|PCount\.pre/i.test(text) ||
+              element.id === "prevNextFocusPrev";
+          });
+      };
       const clickConfirmIfShown = () => {
-        const hasTaskTip = Array.from(document.querySelectorAll(".jobLimitTip, .popWord2"))
-          .some((item) => String(item.innerText || "").replace(/\s+/g, " ").trim().includes("当前章节还有任务点未完成"));
+        const hasTaskTip = Array.from(document.querySelectorAll(".jobLimitTip, .popWord2, .popDiv, .popBottom"))
+          .some((item) => normalizeText(item.innerText).includes("当前章节还有任务点未完成"));
         for (const selector of confirmSelectors) {
           const button = Array.from(document.querySelectorAll(selector)).find(isVisible);
-          if (button && (hasTaskTip || button.classList.contains("nextChapter"))) {
+          if (button && (hasTaskTip || button.classList.contains("nextChapter") || isNextLikeElement(button))) {
             button.click();
             return { clicked: true, selector, confirm: true };
+          }
+        }
+        if (hasTaskTip) {
+          const next = findNextButton();
+          if (next) {
+            next.button.click();
+            return { clicked: true, selector: next.selector, confirm: true };
           }
         }
         return null;
@@ -381,23 +432,30 @@ async function clickNextInAllFrames(sender) {
       }
       const immediateConfirm = clickConfirmIfShown();
       if (immediateConfirm) return immediateConfirm;
-      for (const selector of selectors) {
-        const button = Array.from(document.querySelectorAll(selector)).find(isVisible);
-        if (button) {
-          button.click();
-          for (const delay of [200, 500, 1000, 1800, 3000]) {
-            setTimeout(clickConfirmIfShown, delay);
-          }
-          return { clicked: true, selector };
+      const next = findNextButton();
+      if (next) {
+        next.button.click();
+        for (const delay of [200, 500, 1000, 1800, 3000, 5000, 8000, 12000]) {
+          setTimeout(clickConfirmIfShown, delay);
         }
+        return { clicked: true, selector: next.selector };
       }
-      return { clicked: false };
+      return { clicked: false, lastLesson: hasPreviousLessonButton() };
     }
   });
 
   const clicked = results.find((item) => item.result?.clicked);
-  const response = clicked ? { ok: true, ...clicked.result } : { ok: false, error: "Next button not found." };
-  appendExtensionLog(response.ok ? "info" : "error", "background", response.ok ? "auto_next_clicked" : "auto_next_failed", response, sender);
+  const lastLesson = !clicked && results.some((item) => item.result?.lastLesson);
+  const response = clicked
+    ? { ok: true, ...clicked.result }
+    : { ok: false, lastLesson, error: lastLesson ? "Already at the last lesson." : "Next button not found." };
+  appendExtensionLog(
+    response.ok || response.lastLesson ? "info" : "error",
+    "background",
+    response.ok ? "auto_next_clicked" : response.lastLesson ? "auto_next_last_lesson" : "auto_next_failed",
+    response,
+    sender
+  );
   return response;
 }
 
