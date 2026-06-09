@@ -17,10 +17,15 @@ const observed = new WeakSet();
 const playedVideos = new WeakSet();
 const nextClicked = new WeakSet();
 const endedHandled = new WeakSet();
+const endedHandling = new WeakSet();
+const replayedUnmarkedVideos = new WeakSet();
+const contentScriptStartedAt = Date.now();
 let playedSinceNavigation = false;
 let jobCompleteAutoNextStarted = false;
+let completedJobMarkerAutoNextPending = false;
 const AUTOPLAY_KEY = "audioCheckAutoPlayNextUntil";
 const AUTO_NEXT_CLAIM_KEY = "audioCheckAutoNextClaim";
+const COMPLETED_JOB_MARKER_DELAY_MS = 2500;
 const NEXT_SELECTORS = [
   "#prevNextFocusNext",
   "#prevNextFocusNext a",

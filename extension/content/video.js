@@ -127,8 +127,110 @@ function getCompletedJobMarkers(doc = document) {
   )).filter(isVisible);
 }
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function hasCompletedJobMarkerDeep(root = document, seen = new WeakSet(), depth = 0) {
+  if (!root || depth > 4) return false;
+
+  let doc = null;
+  if (root instanceof Document) {
+    doc = root;
+  } else if (root instanceof HTMLIFrameElement || root instanceof HTMLFrameElement) {
+    try {
+      doc = root.contentWindow?.document || null;
+    } catch {
+      doc = null;
+    }
+  } else {
+    doc = root.ownerDocument || null;
+  }
+
+  if (!doc || seen.has(doc)) return false;
+  seen.add(doc);
+  if (getCompletedJobMarkers(doc).length > 0) return true;
+
+  for (const frame of doc.querySelectorAll("iframe, frame")) {
+    try {
+      if (hasCompletedJobMarkerDeep(frame, seen, depth + 1)) return true;
+    } catch {
+      // Cross-origin and sandboxed frames are ignored here.
+    }
+  }
+  return false;
+}
+
+function hasCompletedJobMarkerInPage() {
+  if (hasCompletedJobMarkerDeep(document)) return true;
+  try {
+    if (window.top?.document && window.top.document !== document) {
+      return hasCompletedJobMarkerDeep(window.top.document);
+    }
+  } catch {
+    // Cross-origin top documents are not accessible from this frame.
+  }
+  return false;
+}
+
+async function scheduleCompletedJobMarkerAutoNext(doc, markerCount) {
+  if (completedJobMarkerAutoNextPending || jobCompleteAutoNextStarted) return;
+  completedJobMarkerAutoNextPending = true;
+  const frameUrl = doc.location?.href || "";
+  const pageKey = getAutoNextPageKey();
+  writeRuntimeLog("info", "auto_next_job_marker_detected", {
+    frameUrl,
+    markerCount,
+    readyState: doc.readyState || "",
+    pageAgeMs: Date.now() - contentScriptStartedAt,
+    delayMs: COMPLETED_JOB_MARKER_DELAY_MS
+  });
+
+  await wait(COMPLETED_JOB_MARKER_DELAY_MS);
+
+  if (!settings.enabled || !settings.autoNextOnEnded || jobCompleteAutoNextStarted) {
+    completedJobMarkerAutoNextPending = false;
+    return;
+  }
+  if (getAutoNextPageKey() !== pageKey) {
+    completedJobMarkerAutoNextPending = false;
+    writeRuntimeLog("info", "auto_next_job_marker_cancelled", {
+      reason: "page_changed",
+      frameUrl
+    });
+    return;
+  }
+  if (getCompletedJobMarkers(doc).length === 0) {
+    completedJobMarkerAutoNextPending = false;
+    writeRuntimeLog("info", "auto_next_job_marker_cancelled", {
+      reason: "marker_missing_after_delay",
+      frameUrl
+    });
+    return;
+  }
+  if (!claimAutoNext("completed-job-marker")) {
+    completedJobMarkerAutoNextPending = false;
+    return;
+  }
+
+  jobCompleteAutoNextStarted = true;
+  writeRuntimeLog("info", "auto_next_job_marker_completed", {
+    frameUrl,
+    markerCount: getCompletedJobMarkers(doc).length,
+    delayed: true,
+    delayMs: COMPLETED_JOB_MARKER_DELAY_MS
+  });
+  sendExtensionNotice(
+    "next_lesson",
+    "任务点已完成，准备进入下一节",
+    "检测到页面任务点已完成标记，将自动切换到下一节。",
+    { dedupeKey: `job-marker:${location.href}`, cooldownSeconds: 10 }
+  );
+  clickNextLesson({ marker: "completed-job", noticeSent: true });
+}
+
 function scanCompletedJobMarkers(root = document, seen = new WeakSet(), depth = 0) {
-  if (!settings.enabled || !settings.autoNextOnEnded || jobCompleteAutoNextStarted) return;
+  if (!settings.enabled || !settings.autoNextOnEnded || jobCompleteAutoNextStarted || completedJobMarkerAutoNextPending) return;
   if (!root || depth > 4) return;
 
   let doc = null;
@@ -149,19 +251,7 @@ function scanCompletedJobMarkers(root = document, seen = new WeakSet(), depth = 
 
   const markers = getCompletedJobMarkers(doc);
   if (markers.length > 0) {
-    if (!claimAutoNext("completed-job-marker")) return;
-    jobCompleteAutoNextStarted = true;
-    writeRuntimeLog("info", "auto_next_job_marker_completed", {
-      frameUrl: doc.location?.href || "",
-      markerCount: markers.length
-    });
-    sendExtensionNotice(
-      "next_lesson",
-      "任务点已完成，准备进入下一节",
-      "检测到页面任务点已完成标记，将自动切换到下一节。",
-      { dedupeKey: `job-marker:${location.href}`, cooldownSeconds: 10 }
-    );
-    clickNextLesson({ marker: "completed-job", noticeSent: true });
+    scheduleCompletedJobMarkerAutoNext(doc, markers.length);
     return;
   }
 
@@ -219,6 +309,35 @@ function clickVideoJsPlayButton() {
     return true;
   }
   return false;
+}
+
+function restartVideo(video) {
+  if (!(video instanceof HTMLVideoElement)) return false;
+  try {
+    if (typeof window.videojs === "function") {
+      const player = window.videojs(video.id || "video_html5_api");
+      player?.currentTime?.(0);
+      const result = player?.play?.();
+      result?.catch?.(() => clickVideoJsPlayButton());
+      return Boolean(player);
+    }
+  } catch {
+    // Fall back to the native video element.
+  }
+
+  try {
+    video.currentTime = 0;
+  } catch {
+    // Some wrapped players restrict direct seeking.
+  }
+
+  try {
+    const result = video.play?.();
+    result?.catch?.(() => clickVideoJsPlayButton());
+    return true;
+  } catch {
+    return clickVideoJsPlayButton();
+  }
 }
 
 function tryPlayVideo(video = findPrimaryVideo()) {
@@ -359,9 +478,59 @@ function onPause(video) {
   timers.set(video, timer);
 }
 
+async function waitForCompletedJobMarker(ms = 1800) {
+  if (hasCompletedJobMarkerInPage()) return true;
+  await wait(ms);
+  scanCompletedJobMarkers();
+  return hasCompletedJobMarkerInPage();
+}
+
+async function handleEndedNavigation(video) {
+  if (endedHandling.has(video)) return;
+  endedHandling.add(video);
+  try {
+    if (await waitForCompletedJobMarker()) {
+      endedHandled.add(video);
+      if (jobCompleteAutoNextStarted) return;
+      clickNextLesson(video);
+      return;
+    }
+
+    if (!replayedUnmarkedVideos.has(video)) {
+      replayedUnmarkedVideos.add(video);
+      writeRuntimeLog("info", "auto_next_replay_unmarked_video", {
+        currentTime: Number.isFinite(video.currentTime) ? video.currentTime : 0,
+        duration: Number.isFinite(video.duration) ? video.duration : 0
+      });
+      sendExtensionNotice(
+        "next_lesson",
+        "任务点未完成，重新播放一次",
+        "视频已结束但页面尚未显示任务点已完成标记，将自动重播一次。",
+        { dedupeKey: `replay-unmarked:${location.href}`, cooldownSeconds: 30 }
+      );
+      restartVideo(video);
+      return;
+    }
+
+    endedHandled.add(video);
+    writeRuntimeLog("error", "auto_next_unmarked_after_replay", {
+      currentTime: Number.isFinite(video.currentTime) ? video.currentTime : 0,
+      duration: Number.isFinite(video.duration) ? video.duration : 0
+    });
+    sendExtensionNotice(
+      "runtime_error",
+      "任务点仍未完成",
+      "视频已重播一次，但页面仍未显示任务点已完成标记，已停止自动进入下一节。",
+      { dedupeKey: `unmarked-after-replay:${location.href}`, cooldownSeconds: 60 }
+    );
+  } finally {
+    endedHandling.delete(video);
+  }
+}
+
 function onEnded(video) {
   clearPauseTimer(video);
-  if (endedHandled.has(video)) return;
+  if (endedHandled.has(video) || endedHandling.has(video)) return;
   if (!playedVideos.has(video)) {
     writeRuntimeLog("info", "auto_next_skipped_unplayed_video", {
       currentTime: Number.isFinite(video.currentTime) ? video.currentTime : 0,
@@ -371,11 +540,10 @@ function onEnded(video) {
     endedHandled.add(video);
     return;
   }
-  endedHandled.add(video);
   if (settings.notifyOnEnded) {
     sendPlaybackEvent(video, "ended");
   }
-  clickNextLesson(video);
+  handleEndedNavigation(video);
 }
 
 function isVideoCompleted(video) {
