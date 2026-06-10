@@ -153,12 +153,83 @@ function findNextConfirmButton() {
   return null;
 }
 
-function clickNextConfirmIfShown() {
+function markNextConfirmPending(reason) {
+  const pending = {
+    pageKey: getAutoNextPageKey(),
+    reason,
+    token: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    ts: Date.now(),
+    clicked: false
+  };
+  nextConfirmPendingFallback = pending;
+  try {
+    sessionStorage.setItem(AUTO_NEXT_CONFIRM_KEY, JSON.stringify(pending));
+  } catch {
+    // If storage is unavailable, the local token still limits scheduled retries in this frame.
+  }
+  return pending;
+}
+
+function readNextConfirmPending(expectedToken = "") {
+  try {
+    const raw = sessionStorage.getItem(AUTO_NEXT_CONFIRM_KEY);
+    if (raw) return normalizeNextConfirmPending(JSON.parse(raw), expectedToken);
+  } catch {
+    // Fall back to the in-memory pending marker below.
+  }
+  return normalizeNextConfirmPending(nextConfirmPendingFallback, expectedToken);
+}
+
+function normalizeNextConfirmPending(pending, expectedToken = "") {
+  if (!pending) return null;
+  const ageMs = Date.now() - Number(pending.ts || 0);
+  if (pending.pageKey !== getAutoNextPageKey()) return null;
+  if (ageMs < 0 || ageMs > NEXT_CONFIRM_WINDOW_MS) return null;
+  if (expectedToken && pending.token !== expectedToken) return null;
+  if (pending.clicked) return null;
+  return { ...pending, ageMs };
+}
+
+function markNextConfirmClicked(pending) {
+  nextConfirmPendingFallback = {
+    ...pending,
+    clicked: true,
+    clickedAt: Date.now()
+  };
+  try {
+    sessionStorage.setItem(AUTO_NEXT_CONFIRM_KEY, JSON.stringify(nextConfirmPendingFallback));
+  } catch {
+    // The click itself is the important side effect; storage is only a guard.
+  }
+}
+
+function logNextConfirmSkipped(reason, details = {}) {
+  const now = Date.now();
+  if (now - nextConfirmSkipLoggedAt < 5000) return;
+  nextConfirmSkipLoggedAt = now;
+  writeRuntimeLog("info", "auto_next_confirm_skipped", {
+    reason,
+    ...details
+  });
+}
+
+function clickNextConfirmIfShown(expectedToken = "") {
   if (!settings.enabled || !settings.autoNextOnEnded) return false;
   const button = findNextConfirmButton();
   if (!button) return false;
+  const pending = readNextConfirmPending(expectedToken);
+  if (!pending) {
+    logNextConfirmSkipped("missing_or_expired_pending_confirm", {
+      button: describeElementForLog(button),
+      diagnostic: getAutoNextDiagnostic(document, { trigger: "confirm-dialog" })
+    });
+    return false;
+  }
+  markNextConfirmClicked(pending);
   writeRuntimeLog("info", "auto_next_confirm_clicking", getAutoNextDiagnostic(document, {
     trigger: "confirm-dialog",
+    pendingReason: pending.reason || "",
+    pendingAgeMs: pending.ageMs,
     button: describeElementForLog(button)
   }));
   markAutoPlayWindow();
@@ -630,10 +701,11 @@ function scheduleAutoPlayAttempts() {
   }
 }
 
-function scheduleNextConfirmAttempts() {
+function scheduleNextConfirmAttempts(reason = "next-click") {
   if (!settings.enabled || !settings.autoNextOnEnded) return;
+  const pending = markNextConfirmPending(reason);
   for (const delay of [200, 500, 1000, 1800, 3000, 5000, 8000, 12000]) {
-    setTimeout(() => clickNextConfirmIfShown(), delay);
+    setTimeout(() => clickNextConfirmIfShown(pending.token), delay);
   }
 }
 
@@ -687,7 +759,7 @@ async function clickNextLesson(video) {
         );
       }
       button.click();
-      scheduleNextConfirmAttempts();
+      scheduleNextConfirmAttempts(trigger);
       scheduleAutoPlayAttempts();
     } catch (error) {
       writeRuntimeLog("error", "auto_next_click_failed", {
@@ -717,6 +789,7 @@ async function clickNextLesson(video) {
       response,
       diagnostic: getAutoNextDiagnostic(document)
     });
+    scheduleNextConfirmAttempts(trigger);
     if (!noticeAlreadySent) {
       sendExtensionNotice(
         "next_lesson",
@@ -742,7 +815,6 @@ async function clickNextLesson(video) {
       { dedupeKey: `next-error:${location.href}`, cooldownSeconds: 30 }
     );
   }
-  scheduleNextConfirmAttempts();
   scheduleAutoPlayAttempts();
 }
 
@@ -975,4 +1047,3 @@ function scanVideosDeep(root = document, seen = new WeakSet(), depth = 0) {
     }
   });
 }
-

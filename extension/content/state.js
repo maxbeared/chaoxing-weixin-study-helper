@@ -29,8 +29,10 @@ let noVideoAutoNextPending = false;
 let noVideoAutoNextStarted = false;
 const AUTOPLAY_KEY = "audioCheckAutoPlayNextUntil";
 const AUTO_NEXT_CLAIM_KEY = "audioCheckAutoNextClaim";
+const AUTO_NEXT_CONFIRM_KEY = "audioCheckAutoNextConfirm";
 const COMPLETED_JOB_MARKER_DELAY_MS = 2500;
 const NO_VIDEO_AUTO_NEXT_DELAY_MS = 10000;
+const NEXT_CONFIRM_WINDOW_MS = 15_000;
 const NEXT_SELECTORS = [
   "#prevNextFocusNext",
   "#prevNextFocusNext a",
@@ -70,4 +72,5 @@ let screenWakeLockRequesting = false;
 let screenWakeLockRetryTimer = 0;
 let screenWakeLockUnsupportedLogged = false;
 let extensionKeepAwakeHeartbeatTimer = 0;
-
+let nextConfirmSkipLoggedAt = 0;
+let nextConfirmPendingFallback = null;
