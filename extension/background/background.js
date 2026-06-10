@@ -4,6 +4,7 @@ const DEFAULTS = {
   enabled: true,
   autoNextOnEnded: true,
   autoPlayNextVideo: true,
+  preventSleep: true,
   targetId: "",
   accountId: "",
   lastContextToken: "",
@@ -20,6 +21,8 @@ const MAX_EXTENSION_LOGS = 2000;
 
 let lastSentAtByKey = new Map();
 let runtimeErrorNotifiedAt = new Map();
+let keepAwakeTabIds = new Set();
+let powerKeepAwakeActive = false;
 
 function storageGet(defaults = DEFAULTS) {
   return new Promise((resolve) => chrome.storage.sync.get(defaults, resolve));
@@ -287,6 +290,53 @@ async function handleExtensionNotice(message, sender) {
   );
 }
 
+async function updatePowerKeepAwake(message, sender) {
+  const tabId = sender.tab?.id;
+  if (tabId === undefined) {
+    appendExtensionLog("error", "background", "power_keep_awake_failed", {
+      active: Boolean(message.active),
+      reason: message.reason || "",
+      error: "No sender tab id."
+    }, sender);
+    return { ok: false, error: "No sender tab id." };
+  }
+
+  if (message.active) {
+    keepAwakeTabIds.add(tabId);
+  } else {
+    keepAwakeTabIds.delete(tabId);
+  }
+
+  try {
+    if (keepAwakeTabIds.size > 0) {
+      chrome.power.requestKeepAwake("display");
+      if (!powerKeepAwakeActive) {
+        appendExtensionLog("info", "background", "power_keep_awake_requested", {
+          reason: message.reason || "",
+          activeTabs: Array.from(keepAwakeTabIds)
+        }, sender);
+      }
+      powerKeepAwakeActive = true;
+    } else {
+      chrome.power.releaseKeepAwake();
+      if (powerKeepAwakeActive) {
+        appendExtensionLog("info", "background", "power_keep_awake_released", {
+          reason: message.reason || ""
+        }, sender);
+      }
+      powerKeepAwakeActive = false;
+    }
+    return { ok: true, active: powerKeepAwakeActive, activeTabCount: keepAwakeTabIds.size };
+  } catch (error) {
+    appendExtensionLog("error", "background", "power_keep_awake_failed", {
+      active: Boolean(message.active),
+      reason: message.reason || "",
+      error: error instanceof Error ? error.message : String(error)
+    }, sender);
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 function installRuntimeErrorReporter() {
   const notify = (kind, error, fallback = "") => {
     const message = error instanceof Error
@@ -506,6 +556,24 @@ async function clickNextInAllFrames(sender, message = {}) {
 
 installRuntimeErrorReporter();
 
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (!keepAwakeTabIds.delete(tabId)) return;
+  if (keepAwakeTabIds.size === 0) {
+    try {
+      chrome.power.releaseKeepAwake();
+      powerKeepAwakeActive = false;
+      appendExtensionLog("info", "background", "power_keep_awake_released", {
+        reason: "tab_removed"
+      });
+    } catch (error) {
+      appendExtensionLog("error", "background", "power_keep_awake_failed", {
+        reason: "tab_removed",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "video-playback-event") {
     handlePlaybackEvent(message, sender).then(sendResponse);
@@ -528,6 +596,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "runtime-log") {
     appendExtensionLog(message.level || "info", message.source || "content", message.event || "log", message.details || {}, sender)
       .then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (message?.type === "power-keep-awake") {
+    updatePowerKeepAwake(message, sender).then(sendResponse);
     return true;
   }
   if (message?.type === "get-extension-logs") {

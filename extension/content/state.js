@@ -3,6 +3,7 @@ const DEFAULTS = {
   enabled: true,
   autoNextOnEnded: true,
   autoPlayNextVideo: true,
+  preventSleep: true,
   notifyOnPause: true,
   notifyOnEnded: true,
   notifyOnStalled: true,
@@ -61,4 +62,9 @@ let cxSecretMap = null;
 let cxSecretLoading = null;
 let cxSecretAttempted = false;
 const runtimeErrorNotifiedAt = new Map();
+let screenWakeLock = null;
+let screenWakeLockRequesting = false;
+let screenWakeLockRetryTimer = 0;
+let screenWakeLockUnsupportedLogged = false;
+let extensionKeepAwakeHeartbeatTimer = 0;
 

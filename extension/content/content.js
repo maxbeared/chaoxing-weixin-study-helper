@@ -4,6 +4,7 @@ writeRuntimeLog("info", "content_script_started", {
   readyState: document.readyState,
   pageAgeMs: Date.now() - contentScriptStartedAt
 });
+installScreenWakeLockController();
 if (window.top === window) {
   startRemoteCommandBridge({ globalOnly: true });
 }
@@ -11,6 +12,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "sync") return;
   for (const [key, change] of Object.entries(changes)) {
     settings[key] = change.newValue;
+  }
+  if (changes.enabled || changes.preventSleep) {
+    refreshScreenWakeLock("settings_changed");
   }
 });
 

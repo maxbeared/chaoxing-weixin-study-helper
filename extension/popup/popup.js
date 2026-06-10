@@ -2,6 +2,7 @@ const DEFAULTS = {
   enabled: true,
   autoNextOnEnded: true,
   autoPlayNextVideo: true,
+  preventSleep: true,
   targetId: "",
   accountId: "",
   lastContextToken: "",
@@ -134,6 +135,7 @@ function loadSettings() {
     $("includeUrl").checked = settings.includeUrl;
     $("autoNextOnEnded").checked = settings.autoNextOnEnded;
     $("autoPlayNextVideo").checked = settings.autoPlayNextVideo;
+    $("preventSleep").checked = settings.preventSleep;
     $("notifyOnPause").checked = settings.notifyOnPause;
     $("notifyOnEnded").checked = settings.notifyOnEnded;
     $("notifyOnStalled").checked = settings.notifyOnStalled;
@@ -150,6 +152,7 @@ function collectSettings() {
     includeUrl: $("includeUrl").checked,
     autoNextOnEnded: $("autoNextOnEnded").checked,
     autoPlayNextVideo: $("autoPlayNextVideo").checked,
+    preventSleep: $("preventSleep").checked,
     notifyOnPause: $("notifyOnPause").checked,
     notifyOnEnded: $("notifyOnEnded").checked,
     notifyOnStalled: $("notifyOnStalled").checked
