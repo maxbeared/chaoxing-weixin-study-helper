@@ -197,6 +197,17 @@ async function pollRemoteQuizReplies(options = {}) {
     }
     return;
   }
+  try {
+    chrome.runtime.sendMessage({
+      type: "remote-command-heartbeat",
+      globalOnly,
+      hasTarget: true,
+      pageUrl: location.href,
+      ts: Date.now()
+    });
+  } catch {
+    // Heartbeat is best-effort; command polling still works without it.
+  }
   remotePollMissingTargetLogged = false;
   const response = await askNative({
     type: "pollMessages",

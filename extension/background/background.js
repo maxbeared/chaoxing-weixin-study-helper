@@ -23,6 +23,10 @@ let lastSentAtByKey = new Map();
 let runtimeErrorNotifiedAt = new Map();
 let keepAwakeTabIds = new Set();
 let powerKeepAwakeActive = false;
+let lastRemoteCommandHeartbeatAt = 0;
+let backgroundRemotePollRunning = false;
+const REMOTE_COMMAND_HEARTBEAT_TTL_MS = 20_000;
+const BACKGROUND_REMOTE_ALARM = "background-remote-command-poll";
 
 function storageGet(defaults = DEFAULTS) {
   return new Promise((resolve) => chrome.storage.sync.get(defaults, resolve));
@@ -288,6 +292,99 @@ async function handleExtensionNotice(message, sender) {
     notice.pageUrl || "",
     notice.cooldownSeconds
   );
+}
+
+function formatBackgroundCommandHelp() {
+  return [
+    "微信命令菜单：",
+    "答题：答 1:A 2:BD 3:错",
+    "答完并提交：答 1:A 2:BD 提交",
+    "提交：提交 / 确认提交 / 交卷",
+    "综合状态：状态",
+    "答题进度：答题进度",
+    "播放进度：播放进度 / 视频进度 / 当前进度",
+    "查看题目：当前 / 题目 3 / 题目 1 2",
+    "重发题目：重发 / 题目全部",
+    "题图：题图 1 / 题图全部",
+    "解析：解析 1 / 解析全部",
+    "错题：错题 / 错题 10 / 清空错题",
+    "API：查看API / 配置API minimax <key>",
+    "自定义API：配置API 自定义 <endpoint> <model> <key>"
+  ].join("\n");
+}
+
+function formatBackgroundShortHelp() {
+  return [
+    "未识别这条微信命令。",
+    "常用格式：",
+    "答 1:A 2:BD 3:错",
+    "答 1:A 2:BD 提交",
+    "状态 / 播放进度 / 题图 1 / 解析 1",
+    "回复“帮助”查看全部命令。"
+  ].join("\n");
+}
+
+function isHelpText(text) {
+  return /^(帮助|菜单|help|\?)$/i.test(String(text || "").replace(/\s+/g, " ").trim());
+}
+
+function isLikelyPageCommand(text) {
+  const raw = String(text || "").replace(/\s+/g, " ").trim();
+  return /^(答|提交|确认提交|提交答案|交卷|状态|答题进度|播放进度|视频进度|当前进度|当前|当前题|题目|重发|题图|截图|图片|拍照|解析|讲解|解释|错题|清空错题)\b/i.test(raw);
+}
+
+async function sendBackgroundRemoteReply(settings, text) {
+  return nativeSend({
+    type: "sendText",
+    targetId: settings.targetId,
+    accountId: settings.accountId || undefined,
+    contextToken: settings.lastContextToken || undefined,
+    text
+  });
+}
+
+async function pollBackgroundRemoteCommands() {
+  if (backgroundRemotePollRunning) return;
+  if (Date.now() - lastRemoteCommandHeartbeatAt <= REMOTE_COMMAND_HEARTBEAT_TTL_MS) return;
+  backgroundRemotePollRunning = true;
+  try {
+    const settings = await storageGet();
+    if (!settings.enabled || !settings.targetId) return;
+    const response = await nativeSend({
+      type: "pollMessages",
+      accountId: settings.accountId || undefined,
+      timeoutMs: 1000
+    });
+    if (!response?.ok || !Array.isArray(response.messages)) {
+      appendExtensionLog("error", "background", "background_remote_poll_failed", {
+        ok: Boolean(response?.ok),
+        error: response?.error || ""
+      });
+      return;
+    }
+    for (const message of response.messages) {
+      const from = message.groupId || message.fromUserId;
+      if (from !== settings.targetId) continue;
+      const text = String(message.text || "").trim();
+      if (!text) continue;
+      let reply = "";
+      if (isHelpText(text)) {
+        reply = formatBackgroundCommandHelp();
+      } else if (isLikelyPageCommand(text)) {
+        reply = "已收到命令，但当前课程页命令桥不在线。请刷新超星课程页后再发送；回复“帮助”查看全部命令。";
+      } else {
+        reply = formatBackgroundShortHelp();
+      }
+      const sent = await sendBackgroundRemoteReply(settings, reply);
+      appendExtensionLog(sent?.ok ? "info" : "error", "background", "background_remote_command_replied", {
+        commandText: text.slice(0, 40),
+        sendOk: Boolean(sent?.ok),
+        sendError: sent?.error || ""
+      });
+    }
+  } finally {
+    backgroundRemotePollRunning = false;
+  }
 }
 
 async function updatePowerKeepAwake(message, sender) {
@@ -556,6 +653,18 @@ async function clickNextInAllFrames(sender, message = {}) {
 
 installRuntimeErrorReporter();
 
+chrome.alarms.create(BACKGROUND_REMOTE_ALARM, {
+  delayInMinutes: 0.1,
+  periodInMinutes: 0.5
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== BACKGROUND_REMOTE_ALARM) return;
+  pollBackgroundRemoteCommands();
+});
+
+setInterval(pollBackgroundRemoteCommands, 8000);
+
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason !== "install") return;
   chrome.storage.sync.set({
@@ -608,6 +717,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "runtime-log") {
     appendExtensionLog(message.level || "info", message.source || "content", message.event || "log", message.details || {}, sender)
       .then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (message?.type === "remote-command-heartbeat") {
+    if (message.hasTarget) lastRemoteCommandHeartbeatAt = Date.now();
+    sendResponse({ ok: true });
     return true;
   }
   if (message?.type === "power-keep-awake") {
