@@ -5,6 +5,7 @@ native-host/build/
 native-host/dist/
 native-host/*.generated.json
 release/
+.DS_Store
 page-*.png
 *-inspect.png
 inspect-*.png
