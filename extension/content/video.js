@@ -381,6 +381,65 @@ function findPrimaryVideo() {
   return null;
 }
 
+function findPrimaryVideoDeep(root = document, seen = new WeakSet(), depth = 0) {
+  if (!root || depth > 4) return null;
+  let doc = null;
+  if (root instanceof Document) {
+    doc = root;
+  } else if (root instanceof HTMLIFrameElement || root instanceof HTMLFrameElement) {
+    try {
+      doc = root.contentWindow?.document || null;
+    } catch {
+      doc = null;
+    }
+  } else {
+    doc = root.ownerDocument || null;
+  }
+
+  if (!doc || seen.has(doc)) return null;
+  seen.add(doc);
+  for (const selector of VIDEO_SELECTORS) {
+    const video = doc.querySelector(selector);
+    if (video instanceof HTMLVideoElement) return video;
+  }
+  for (const frame of doc.querySelectorAll("iframe, frame")) {
+    const video = findPrimaryVideoDeep(frame, seen, depth + 1);
+    if (video) return video;
+  }
+  return null;
+}
+
+function formatPlaybackTime(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "--:--";
+  const rounded = Math.floor(seconds);
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const rest = rounded % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(rest).padStart(2, "0")}`;
+}
+
+function playbackStateLabel(video) {
+  if (!(video instanceof HTMLVideoElement)) return "未检测到视频";
+  if (video.ended) return "已结束";
+  if (video.paused && Number(video.currentTime || 0) <= 0) return "未开始/加载中";
+  if (video.paused) return "暂停中";
+  return "正在播放";
+}
+
+function getPlaybackProgressSummary() {
+  const video = findPrimaryVideoDeep() || findPrimaryVideo();
+  if (!(video instanceof HTMLVideoElement)) {
+    return "视频进度：当前页面未检测到视频。";
+  }
+  const currentTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+  const percent = duration > 0 ? `${Math.min(100, Math.max(0, Math.round((currentTime / duration) * 100)))}%` : "未知";
+  return `视频进度：${formatPlaybackTime(currentTime)} / ${formatPlaybackTime(duration)}（${percent}），${playbackStateLabel(video)}`;
+}
+
 function playWithVideoJs(video) {
   try {
     if (typeof window.videojs !== "function") return false;

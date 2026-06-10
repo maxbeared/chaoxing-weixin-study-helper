@@ -165,16 +165,25 @@ function formatQuestionForWeixin(question, index) {
 function formatQuizForWeixin(questions) {
   return [
     `检测到章节习题，共 ${questions.length} 题。`,
-    "请直接回复你的选项，格式示例：",
-    "答 1:A 2:BD 3:错",
-    "填完后如需提交，请单独回复：提交",
-    "远程配置API：配置API minimax <key>",
-    "查看配置：查看API",
-    "查看解析：解析 1（或 解析全部）",
-    "重发题图：题图 1（或 题图全部）",
+    "常用命令：答 1:A 2:BD 3:错",
+    "答完并提交：答 1:A 2:BD 提交",
+    "状态 / 播放进度 / 题图 1 / 解析 1",
+    "回复“帮助”查看全部命令。",
     "页面使用防复制字体时，请以随后发送的题目截图为准。",
     "",
     ...questions.map(formatQuestionForWeixin)
   ].join("\n\n").slice(0, 6000);
 }
 
+function formatQuestionListForWeixin(questions, indexes) {
+  const lines = [];
+  for (const index of indexes) {
+    const question = questions[index];
+    if (!question) {
+      lines.push(`第 ${index + 1} 题不存在。`);
+      continue;
+    }
+    lines.push(formatQuestionForWeixin(question, index));
+  }
+  return lines.length ? lines.join("\n\n").slice(0, 6000) : "当前页面未检测到题目。";
+}

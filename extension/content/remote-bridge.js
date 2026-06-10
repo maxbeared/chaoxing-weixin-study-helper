@@ -168,6 +168,25 @@ async function sendRemoteQuizIfNeeded(questions) {
   sessionStorage.setItem(key, String(Date.now()));
 }
 
+async function handleQuestionTextCommand(command, settings) {
+  const questions = extractQuestions();
+  if (!questions.length) {
+    await sendWeixinText(settings, "当前页面未检测到题目。");
+    return true;
+  }
+  let indexes = [];
+  if (command.all) {
+    indexes = questions.map((_, index) => index);
+  } else if (command.current) {
+    const current = questions.findIndex((question) => !hiddenAnswerValue(question));
+    indexes = [current >= 0 ? current : 0];
+  } else {
+    indexes = Array.from(new Set(command.indexes || []));
+  }
+  await sendWeixinText(settings, formatQuestionListForWeixin(questions, indexes));
+  return true;
+}
+
 async function pollRemoteQuizReplies(options = {}) {
   const globalOnly = Boolean(options.globalOnly);
   const settings = await remoteQuizSettings();
@@ -221,35 +240,80 @@ async function pollRemoteQuizReplies(options = {}) {
       });
       continue;
     }
+    if (parseHelpCommand(text)) {
+      if (!claimRemoteMessage(message, "help")) continue;
+      await sendWeixinText(settings, formatWeixinCommandHelp());
+      continue;
+    }
+    if (parseStatusCommand(text)) {
+      if (!claimRemoteMessage(message, "status")) continue;
+      await sendWeixinText(settings, formatPageStatusForWeixin());
+      continue;
+    }
+    if (parseQuizProgressCommand(text)) {
+      if (!claimRemoteMessage(message, "quiz-progress")) continue;
+      await sendWeixinText(settings, formatQuizProgressForWeixin());
+      continue;
+    }
+    if (parsePlaybackProgressCommand(text)) {
+      if (!claimRemoteMessage(message, "playback-progress")) continue;
+      const summary = typeof getPlaybackProgressSummary === "function"
+        ? getPlaybackProgressSummary()
+        : "视频进度：当前页面未检测到视频。";
+      await sendWeixinText(settings, summary);
+      continue;
+    }
     if (globalOnly) continue;
+    const questionTextCommand = parseQuestionTextCommand(text);
+    if (questionTextCommand) {
+      if (!claimRemoteMessage(message, "question-text")) continue;
+      await handleQuestionTextCommand(questionTextCommand, settings);
+      continue;
+    }
     const explainCommand = parseExplainCommand(text);
     if (explainCommand) {
+      if (!claimRemoteMessage(message, "explain")) continue;
       await handleExplainCommand(explainCommand, settings);
       continue;
     }
     const screenshotCommand = parseScreenshotCommand(text);
     if (screenshotCommand) {
+      if (!claimRemoteMessage(message, "screenshot")) continue;
       await handleScreenshotCommand(screenshotCommand, settings);
       continue;
     }
     const wrongBookCommand = parseWrongBookCommand(text);
     if (wrongBookCommand) {
+      if (!claimRemoteMessage(message, "wrong-book")) continue;
       await handleWrongBookCommand(wrongBookCommand, settings);
       continue;
     }
     if (isSubmitCommand(text)) {
+      if (!claimRemoteMessage(message, "submit")) continue;
       const submitted = clickSubmitIfRequested("remote");
       await sendWeixinText(settings, submitted.ok ? "已收到“提交”命令，已在页面点击提交。" : `收到“提交”命令，但未提交：${submitted.reason}`);
       continue;
     }
     const answers = parseRemoteAnswers(text);
-    if (!answers.length) continue;
+    if (!answers.length) {
+      if (cleanText(text) && claimRemoteMessage(message, "unknown")) {
+        await sendWeixinText(settings, formatWeixinShortHelp());
+      }
+      continue;
+    }
+    if (!claimRemoteMessage(message, "answers")) continue;
     const result = applyRemoteAnswers(answers);
-    await sendWeixinText(settings, [
-        result.applied.length ? `已填入：${result.applied.join(" ")}` : "",
-        result.failed.length ? `未识别：${result.failed.join(" ")}` : "",
-        "如需提交，请单独回复：提交"
-      ].filter(Boolean).join("\n"));
+    const replyLines = [
+      result.applied.length ? `已填入：${result.applied.join(" ")}` : "",
+      result.failed.length ? `未识别：${result.failed.join(" ")}` : ""
+    ].filter(Boolean);
+    if (hasInlineSubmitCommand(text)) {
+      const submitted = clickSubmitIfRequested("remote");
+      replyLines.push(submitted.ok ? "已收到同条“提交”命令，已在页面点击提交。" : `收到同条“提交”命令，但未提交：${submitted.reason}`);
+    } else {
+      replyLines.push("如需提交，请单独回复：提交；也可以下次直接发送：答 1:A 2:BD 提交");
+    }
+    await sendWeixinText(settings, replyLines.join("\n"));
   }
 }
 

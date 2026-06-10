@@ -52,6 +52,44 @@ function hiddenAnswerValue(question) {
   return input?.value || "";
 }
 
+function quizProgressDetails(questions = extractQuestions()) {
+  const answered = [];
+  const unanswered = [];
+  for (const [index, question] of questions.entries()) {
+    (hiddenAnswerValue(question) ? answered : unanswered).push(index + 1);
+  }
+  return {
+    total: questions.length,
+    answered,
+    unanswered,
+    canSubmit: questions.length > 0 && unanswered.length === 0
+  };
+}
+
+function formatQuizProgressForWeixin(questions = extractQuestions()) {
+  const progress = quizProgressDetails(questions);
+  if (!progress.total) return "答题进度：当前页面未检测到题目。";
+  const lines = [
+    `答题进度：已答 ${progress.answered.length}/${progress.total} 题。`
+  ];
+  if (progress.unanswered.length) {
+    lines.push(`未答题号：${progress.unanswered.join(", ")}`);
+  } else {
+    lines.push("全部题目已作答。");
+  }
+  lines.push(`可提交：${progress.canSubmit ? "是" : "否"}`);
+  return lines.join("\n");
+}
+
+function formatPageStatusForWeixin() {
+  const questions = extractQuestions();
+  return [
+    "当前状态：",
+    typeof getPlaybackProgressSummary === "function" ? getPlaybackProgressSummary() : "视频进度：当前页面未检测到视频。",
+    formatQuizProgressForWeixin(questions)
+  ].join("\n");
+}
+
 function clickAnswerOption(question, label) {
   const block = findQuestionBlock(question);
   if (!block) return false;
@@ -263,4 +301,3 @@ async function handleWrongBookCommand(command, settings) {
   await sendWeixinText(settings, formatWrongBookForWeixin(records, command.limit || 5));
   return true;
 }
-
