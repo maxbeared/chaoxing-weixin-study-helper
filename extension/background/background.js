@@ -556,6 +556,18 @@ async function clickNextInAllFrames(sender, message = {}) {
 
 installRuntimeErrorReporter();
 
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason !== "install") return;
+  chrome.storage.sync.set({
+    targetId: "",
+    lastContextToken: ""
+  }, () => {
+    appendExtensionLog("info", "background", "install_target_cleared", {
+      reason: details.reason
+    });
+  });
+});
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (!keepAwakeTabIds.delete(tabId)) return;
   if (keepAwakeTabIds.size === 0) {

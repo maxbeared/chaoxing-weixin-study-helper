@@ -285,9 +285,15 @@ async function waitLogin() {
   }
   if (response?.ok && response.accountId) {
     $("accountId").value = response.accountId;
+    $("targetId").value = "";
+    await chrome.storage.sync.set({
+      accountId: response.accountId,
+      targetId: "",
+      lastContextToken: ""
+    });
     await saveSettings();
     $("statusText").textContent = "微信已连接";
-    log("微信已连接。现在用接收通知的微信给助手发一句话，然后点“读取最近消息”，系统会自动填入微信目标 ID。");
+    log("微信已连接。已清空旧的微信目标 ID。现在用接收通知的微信给助手发一句话，然后点“读取最近消息”重新绑定目标。");
     return;
   }
   log(response);
