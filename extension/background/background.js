@@ -16,7 +16,7 @@ const DEFAULTS = {
 };
 
 const EXTENSION_LOGS_KEY = "audioCheckRuntimeLogs";
-const MAX_EXTENSION_LOGS = 500;
+const MAX_EXTENSION_LOGS = 2000;
 
 let lastSentAtByKey = new Map();
 let runtimeErrorNotifiedAt = new Map();
@@ -333,12 +333,17 @@ function installRuntimeErrorReporter() {
   });
 }
 
-async function clickNextInAllFrames(sender) {
+async function clickNextInAllFrames(sender, message = {}) {
   const tabId = sender.tab?.id;
   if (!tabId) {
     appendExtensionLog("error", "background", "auto_next_failed", { error: "No tab id for auto-next request." }, sender);
     return { ok: false, error: "No tab id for auto-next request." };
   }
+  appendExtensionLog("info", "background", "auto_next_frame_request_started", {
+    trigger: message.trigger || "",
+    pageUrl: message.pageUrl || sender.tab?.url || "",
+    diagnostic: message.diagnostic || null
+  }, sender);
 
   const results = await chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
@@ -366,6 +371,34 @@ async function clickNextInAllFrames(sender) {
         return rect.width > 0 && rect.height > 0;
       };
       const normalizeText = (text) => String(text || "").replace(/\s+/g, " ").trim();
+      const clipText = (value, max = 160) => {
+        const text = normalizeText(value);
+        return text.length > max ? `${text.slice(0, max)}...` : text;
+      };
+      const describeButton = (element) => {
+        if (!(element instanceof HTMLElement)) return null;
+        const rect = element.getBoundingClientRect();
+        return {
+          tag: element.tagName,
+          id: element.id || "",
+          className: typeof element.className === "string" ? clipText(element.className, 120) : "",
+          text: clipText([
+            element.innerText,
+            element.textContent,
+            element.getAttribute("title"),
+            element.getAttribute("aria-label"),
+            element.getAttribute("value")
+          ].filter(Boolean).join(" "), 160),
+          onclick: clipText(element.getAttribute("onclick") || "", 200),
+          href: clipText(element.getAttribute("href") || "", 200),
+          rect: {
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height)
+          }
+        };
+      };
       const isNextLikeElement = (element) => {
         if (!(element instanceof HTMLElement)) return false;
         const onclick = String(element.getAttribute("onclick") || "");
@@ -413,14 +446,14 @@ async function clickNextInAllFrames(sender) {
           const button = Array.from(document.querySelectorAll(selector)).find(isVisible);
           if (button && (hasTaskTip || button.classList.contains("nextChapter") || isNextLikeElement(button))) {
             button.click();
-            return { clicked: true, selector, confirm: true };
+            return { clicked: true, selector, confirm: true, hasTaskTip, frameUrl: location.href, frameTitle: document.title, button: describeButton(button) };
           }
         }
         if (hasTaskTip) {
           const next = findNextButton();
           if (next) {
             next.button.click();
-            return { clicked: true, selector: next.selector, confirm: true };
+            return { clicked: true, selector: next.selector, confirm: true, hasTaskTip, frameUrl: location.href, frameTitle: document.title, button: describeButton(next.button) };
           }
         }
         return null;
@@ -438,22 +471,34 @@ async function clickNextInAllFrames(sender) {
         for (const delay of [200, 500, 1000, 1800, 3000, 5000, 8000, 12000]) {
           setTimeout(clickConfirmIfShown, delay);
         }
-        return { clicked: true, selector: next.selector };
+        return { clicked: true, selector: next.selector, frameUrl: location.href, frameTitle: document.title, button: describeButton(next.button) };
       }
-      return { clicked: false, lastLesson: hasPreviousLessonButton() };
+      return {
+        clicked: false,
+        lastLesson: hasPreviousLessonButton(),
+        frameUrl: location.href,
+        frameTitle: document.title,
+        readyState: document.readyState,
+        nextCandidateCount: selectors.reduce((count, selector) => count + document.querySelectorAll(selector).length, 0),
+        confirmCandidateCount: confirmSelectors.reduce((count, selector) => count + document.querySelectorAll(selector).length, 0)
+      };
     }
   });
 
   const clicked = results.find((item) => item.result?.clicked);
   const lastLesson = !clicked && results.some((item) => item.result?.lastLesson);
   const response = clicked
-    ? { ok: true, ...clicked.result }
+    ? { ok: true, frameId: clicked.frameId, ...clicked.result }
     : { ok: false, lastLesson, error: lastLesson ? "Already at the last lesson." : "Next button not found." };
   appendExtensionLog(
     response.ok || response.lastLesson ? "info" : "error",
     "background",
     response.ok ? "auto_next_clicked" : response.lastLesson ? "auto_next_last_lesson" : "auto_next_failed",
-    response,
+    {
+      trigger: message.trigger || "",
+      ...response,
+      frameResults: results.map((item) => ({ frameId: item.frameId, result: item.result })).slice(0, 20)
+    },
     sender
   );
   return response;
@@ -471,7 +516,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.type === "auto-next-request") {
-    clickNextInAllFrames(sender).then(sendResponse).catch((error) => {
+    clickNextInAllFrames(sender, message).then(sendResponse).catch((error) => {
       appendExtensionLog("error", "background", "auto_next_exception", {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack || "" : ""

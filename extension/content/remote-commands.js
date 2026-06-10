@@ -45,6 +45,9 @@ function parseScreenshotCommand(text) {
 
 function parseApiConfigCommand(text) {
   const raw = String(text || "").trim();
+  if (/^查看\s*API$/i.test(raw) || /^API\s*状态$/i.test(raw)) {
+    return { action: "status" };
+  }
   if (/^(查看API|查看api|api状态|API状态)$/i.test(raw)) {
     return { action: "status" };
   }
@@ -104,4 +107,3 @@ function formatApiStatus(response) {
   }
   return lines.join("\n");
 }
-

@@ -11,6 +11,79 @@ function normalizeUiText(text) {
   return String(text || "").replace(/\s+/g, " ").trim();
 }
 
+function clipLogText(value, max = 160) {
+  const text = normalizeUiText(value);
+  return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
+function describeElementForLog(element) {
+  if (!(element instanceof HTMLElement)) return null;
+  const rect = element.getBoundingClientRect();
+  return {
+    tag: element.tagName,
+    id: element.id || "",
+    className: typeof element.className === "string" ? clipLogText(element.className, 120) : "",
+    text: clipLogText([
+      element.innerText,
+      element.textContent,
+      element.getAttribute("title"),
+      element.getAttribute("aria-label"),
+      element.getAttribute("value")
+    ].filter(Boolean).join(" "), 160),
+    onclick: clipLogText(element.getAttribute("onclick") || "", 200),
+    href: clipLogText(element.getAttribute("href") || "", 200),
+    visible: isVisible(element),
+    rect: {
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height)
+    }
+  };
+}
+
+function describeVideoForLog(video) {
+  if (!(video instanceof HTMLVideoElement)) return null;
+  return {
+    mark: video.getAttribute(VIDEO_MARK) || "",
+    src: clipLogText(video.currentSrc || video.src || "", 220),
+    currentTime: Number.isFinite(video.currentTime) ? Number(video.currentTime.toFixed(3)) : 0,
+    duration: Number.isFinite(video.duration) ? Number(video.duration.toFixed(3)) : 0,
+    paused: video.paused,
+    ended: video.ended,
+    readyState: video.readyState,
+    networkState: video.networkState,
+    played: playedVideos.has(video),
+    replayedUnmarked: replayedUnmarkedVideos.has(video)
+  };
+}
+
+function describeVideosForLog(doc = document) {
+  try {
+    return Array.from(doc.querySelectorAll("video")).slice(0, 5).map(describeVideoForLog);
+  } catch {
+    return [];
+  }
+}
+
+function describeMarkersForLog(doc = document) {
+  return getCompletedJobMarkers(doc).slice(0, 8).map(describeElementForLog);
+}
+
+function getAutoNextDiagnostic(doc = document, extra = {}) {
+  return {
+    pageAgeMs: Date.now() - contentScriptStartedAt,
+    topPageKey: getAutoNextPageKey(),
+    frameReadyState: doc?.readyState || "",
+    documentHidden: document.hidden,
+    playedSinceNavigation,
+    videos: describeVideosForLog(doc),
+    completedJobMarkers: describeMarkersForLog(doc),
+    nextButton: describeElementForLog(findNextButton()),
+    ...extra
+  };
+}
+
 function isNextLikeElement(element) {
   if (!(element instanceof HTMLElement)) return false;
   const onclick = String(element.getAttribute("onclick") || "");
@@ -84,6 +157,10 @@ function clickNextConfirmIfShown() {
   if (!settings.enabled || !settings.autoNextOnEnded) return false;
   const button = findNextConfirmButton();
   if (!button) return false;
+  writeRuntimeLog("info", "auto_next_confirm_clicking", getAutoNextDiagnostic(document, {
+    trigger: "confirm-dialog",
+    button: describeElementForLog(button)
+  }));
   markAutoPlayWindow();
   button.click();
   scheduleAutoPlayAttempts();
@@ -183,20 +260,27 @@ async function scheduleCompletedJobMarkerAutoNext(doc, markerCount) {
     markerCount,
     readyState: doc.readyState || "",
     pageAgeMs: Date.now() - contentScriptStartedAt,
-    delayMs: COMPLETED_JOB_MARKER_DELAY_MS
+    delayMs: COMPLETED_JOB_MARKER_DELAY_MS,
+    diagnostic: getAutoNextDiagnostic(doc)
   });
 
   await wait(COMPLETED_JOB_MARKER_DELAY_MS);
 
   if (!settings.enabled || !settings.autoNextOnEnded || jobCompleteAutoNextStarted) {
     completedJobMarkerAutoNextPending = false;
+    writeRuntimeLog("info", "auto_next_job_marker_cancelled", {
+      reason: !settings.enabled ? "disabled" : !settings.autoNextOnEnded ? "auto_next_disabled" : "already_started",
+      frameUrl,
+      diagnostic: getAutoNextDiagnostic(doc)
+    });
     return;
   }
   if (getAutoNextPageKey() !== pageKey) {
     completedJobMarkerAutoNextPending = false;
     writeRuntimeLog("info", "auto_next_job_marker_cancelled", {
       reason: "page_changed",
-      frameUrl
+      frameUrl,
+      diagnostic: getAutoNextDiagnostic(doc)
     });
     return;
   }
@@ -204,12 +288,18 @@ async function scheduleCompletedJobMarkerAutoNext(doc, markerCount) {
     completedJobMarkerAutoNextPending = false;
     writeRuntimeLog("info", "auto_next_job_marker_cancelled", {
       reason: "marker_missing_after_delay",
-      frameUrl
+      frameUrl,
+      diagnostic: getAutoNextDiagnostic(doc)
     });
     return;
   }
   if (!claimAutoNext("completed-job-marker")) {
     completedJobMarkerAutoNextPending = false;
+    writeRuntimeLog("info", "auto_next_job_marker_cancelled", {
+      reason: "claim_rejected",
+      frameUrl,
+      diagnostic: getAutoNextDiagnostic(doc)
+    });
     return;
   }
 
@@ -218,7 +308,8 @@ async function scheduleCompletedJobMarkerAutoNext(doc, markerCount) {
     frameUrl,
     markerCount: getCompletedJobMarkers(doc).length,
     delayed: true,
-    delayMs: COMPLETED_JOB_MARKER_DELAY_MS
+    delayMs: COMPLETED_JOB_MARKER_DELAY_MS,
+    diagnostic: getAutoNextDiagnostic(doc)
   });
   sendExtensionNotice(
     "next_lesson",
@@ -382,9 +473,33 @@ function scheduleNextConfirmAttempts() {
 }
 
 async function clickNextLesson(video) {
-  if (!settings.enabled || !settings.autoNextOnEnded) return;
-  if (video && typeof video === "object" && nextClicked.has(video)) return;
-  if (hasRemoteSubmitPending()) return;
+  const trigger = video instanceof HTMLVideoElement ? "video-ended" : video?.marker || "unknown";
+  const diagnostic = getAutoNextDiagnostic(document, {
+    trigger,
+    triggerVideo: video instanceof HTMLVideoElement ? describeVideoForLog(video) : null
+  });
+  writeRuntimeLog("info", "auto_next_decision_started", diagnostic);
+  if (!settings.enabled || !settings.autoNextOnEnded) {
+    writeRuntimeLog("info", "auto_next_decision_skipped", {
+      reason: !settings.enabled ? "disabled" : "auto_next_disabled",
+      diagnostic
+    });
+    return;
+  }
+  if (video && typeof video === "object" && nextClicked.has(video)) {
+    writeRuntimeLog("info", "auto_next_decision_skipped", {
+      reason: "already_clicked_for_trigger",
+      diagnostic
+    });
+    return;
+  }
+  if (hasRemoteSubmitPending()) {
+    writeRuntimeLog("info", "auto_next_decision_skipped", {
+      reason: "remote_submit_pending",
+      diagnostic
+    });
+    return;
+  }
   if (video && typeof video === "object") nextClicked.add(video);
   const noticeAlreadySent = Boolean(video?.noticeSent);
   markAutoPlayWindow();
@@ -393,7 +508,10 @@ async function clickNextLesson(video) {
   if (button) {
     try {
       writeRuntimeLog("info", "auto_next_clicking", {
-        selector: button.id ? `#${button.id}` : button.className || button.tagName
+        trigger,
+        selector: button.id ? `#${button.id}` : button.className || button.tagName,
+        button: describeElementForLog(button),
+        diagnostic: getAutoNextDiagnostic(document)
       });
       if (!noticeAlreadySent) {
         sendExtensionNotice(
@@ -424,10 +542,16 @@ async function clickNextLesson(video) {
   const response = await askExtension({
     type: "auto-next-request",
     pageUrl: location.href,
+    trigger,
+    diagnostic,
     ts: Date.now()
   });
   if (response?.ok) {
-    writeRuntimeLog("info", "auto_next_clicked_in_frames", response);
+    writeRuntimeLog("info", "auto_next_clicked_in_frames", {
+      trigger,
+      response,
+      diagnostic: getAutoNextDiagnostic(document)
+    });
     if (!noticeAlreadySent) {
       sendExtensionNotice(
         "next_lesson",
@@ -441,7 +565,11 @@ async function clickNextLesson(video) {
       notifyLastLesson(response || {});
       return;
     }
-    writeRuntimeLog("error", "auto_next_failed", response || { error: "No response" });
+    writeRuntimeLog("error", "auto_next_failed", {
+      trigger,
+      response: response || { error: "No response" },
+      diagnostic: getAutoNextDiagnostic(document)
+    });
     sendExtensionNotice(
       "runtime_error",
       "切换下一节失败",
@@ -479,10 +607,27 @@ function onPause(video) {
 }
 
 async function waitForCompletedJobMarker(ms = 1800) {
-  if (hasCompletedJobMarkerInPage()) return true;
+  if (hasCompletedJobMarkerInPage()) {
+    writeRuntimeLog("info", "auto_next_completed_marker_check", getAutoNextDiagnostic(document, {
+      result: true,
+      phase: "immediate"
+    }));
+    return true;
+  }
+  writeRuntimeLog("info", "auto_next_completed_marker_check", getAutoNextDiagnostic(document, {
+    result: false,
+    phase: "before_wait",
+    waitMs: ms
+  }));
   await wait(ms);
   scanCompletedJobMarkers();
-  return hasCompletedJobMarkerInPage();
+  const result = hasCompletedJobMarkerInPage();
+  writeRuntimeLog("info", "auto_next_completed_marker_check", getAutoNextDiagnostic(document, {
+    result,
+    phase: "after_wait",
+    waitMs: ms
+  }));
+  return result;
 }
 
 async function handleEndedNavigation(video) {
@@ -531,12 +676,15 @@ async function handleEndedNavigation(video) {
 function onEnded(video) {
   clearPauseTimer(video);
   if (endedHandled.has(video) || endedHandling.has(video)) return;
+  writeRuntimeLog("info", "auto_next_video_ended_seen", getAutoNextDiagnostic(document, {
+    trigger: "video-ended",
+    triggerVideo: describeVideoForLog(video)
+  }));
   if (!playedVideos.has(video)) {
-    writeRuntimeLog("info", "auto_next_skipped_unplayed_video", {
-      currentTime: Number.isFinite(video.currentTime) ? video.currentTime : 0,
-      duration: Number.isFinite(video.duration) ? video.duration : 0,
-      ended: video.ended
-    });
+    writeRuntimeLog("info", "auto_next_skipped_unplayed_video", getAutoNextDiagnostic(document, {
+      trigger: "video-ended",
+      triggerVideo: describeVideoForLog(video)
+    }));
     endedHandled.add(video);
     return;
   }
@@ -572,15 +720,25 @@ function watchVideo(video) {
   observed.add(video);
   video.setAttribute(VIDEO_MARK, String(++videoSeq));
   lastProgress.set(video, Date.now());
+  writeRuntimeLog("info", "video_observed", {
+    video: describeVideoForLog(video),
+    pageAgeMs: Date.now() - contentScriptStartedAt
+  });
 
   video.addEventListener("play", () => {
     playedVideos.add(video);
     playedSinceNavigation = true;
+    writeRuntimeLog("info", "video_play_seen", {
+      video: describeVideoForLog(video)
+    });
     clearPauseTimer(video);
   }, true);
   video.addEventListener("playing", () => {
     playedVideos.add(video);
     playedSinceNavigation = true;
+    writeRuntimeLog("info", "video_playing_seen", {
+      video: describeVideoForLog(video)
+    });
     clearPauseTimer(video);
     lastProgress.set(video, Date.now());
   }, true);

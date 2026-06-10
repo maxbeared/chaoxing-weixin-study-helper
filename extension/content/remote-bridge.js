@@ -118,6 +118,22 @@ function remoteSessionKey() {
   return `${REMOTE_QUIZ_KEY_PREFIX}${location.origin}${location.pathname}${location.search}`;
 }
 
+function remoteMessageClaimKey(message, commandName) {
+  const id = message?.messageId || `${message?.createdAt || ""}:${message?.fromUserId || ""}:${message?.groupId || ""}:${message?.text || ""}`;
+  return `${REMOTE_QUIZ_KEY_PREFIX}remoteCommand:${commandName}:${id}`;
+}
+
+function claimRemoteMessage(message, commandName) {
+  try {
+    const key = remoteMessageClaimKey(message, commandName);
+    if (sessionStorage.getItem(key)) return false;
+    sessionStorage.setItem(key, String(Date.now()));
+  } catch {
+    // If storage is unavailable, process the message once in this frame.
+  }
+  return true;
+}
+
 async function remoteQuizSettings() {
   return new Promise((resolve) => {
     chrome.storage.sync.get({
@@ -152,27 +168,60 @@ async function sendRemoteQuizIfNeeded(questions) {
   sessionStorage.setItem(key, String(Date.now()));
 }
 
-async function pollRemoteQuizReplies() {
+async function pollRemoteQuizReplies(options = {}) {
+  const globalOnly = Boolean(options.globalOnly);
   const settings = await remoteQuizSettings();
-  if (!settings.targetId) return;
+  if (!settings.targetId) {
+    if (!remotePollMissingTargetLogged) {
+      remotePollMissingTargetLogged = true;
+      writeRuntimeLog("info", "remote_poll_skipped", { reason: "missing_target" });
+    }
+    return;
+  }
+  remotePollMissingTargetLogged = false;
   const response = await askNative({
     type: "pollMessages",
     accountId: settings.accountId || undefined,
     timeoutMs: 1000
   });
-  if (!response?.ok || !Array.isArray(response.messages)) return;
+  if (!response?.ok || !Array.isArray(response.messages)) {
+    writeRuntimeLog("error", "remote_poll_failed", {
+      ok: Boolean(response?.ok),
+      error: response?.error || "",
+      hasMessages: Array.isArray(response?.messages)
+    });
+    return;
+  }
+  if (response.messages.length) {
+    writeRuntimeLog("info", "remote_poll_finished", {
+      count: response.messages.length
+    });
+  }
   for (const message of response.messages) {
     const from = message.groupId || message.fromUserId;
     if (from !== settings.targetId) continue;
     const text = message.text || "";
     const apiCommand = parseApiConfigCommand(text);
     if (apiCommand) {
+      if (!claimRemoteMessage(message, `api:${apiCommand.action}`)) continue;
+      writeRuntimeLog("info", "remote_api_command_received", {
+        action: apiCommand.action,
+        messageId: message.messageId || "",
+        createdAt: message.createdAt || 0
+      });
       const apiResponse = apiCommand.action === "status"
         ? await askNative({ type: "getLlmSettings" })
         : await askNative({ type: "saveLlmSettings", settings: apiCommand.settings });
-      await sendWeixinText(settings, formatApiStatus(apiResponse));
+      const sent = await sendWeixinText(settings, formatApiStatus(apiResponse));
+      writeRuntimeLog(sent?.ok ? "info" : "error", "remote_api_command_replied", {
+        action: apiCommand.action,
+        apiOk: Boolean(apiResponse?.ok),
+        sendOk: Boolean(sent?.ok),
+        sendError: sent?.error || ""
+      });
       continue;
     }
+    if (globalOnly) continue;
     const explainCommand = parseExplainCommand(text);
     if (explainCommand) {
       await handleExplainCommand(explainCommand, settings);
@@ -204,10 +253,30 @@ async function pollRemoteQuizReplies() {
   }
 }
 
-function startRemoteQuizBridge(questions) {
-  if (remoteQuizStarted || !questions.length) return;
-  remoteQuizStarted = true;
-  sendRemoteQuizIfNeeded(questions);
-  remoteQuizPollTimer = window.setInterval(pollRemoteQuizReplies, 8000);
+function startRemoteCommandBridge(options = {}) {
+  const globalOnly = Boolean(options.globalOnly);
+  if (remoteCommandPollTimer) {
+    if (remoteCommandBridgeGlobalOnly && !globalOnly) {
+      window.clearInterval(remoteCommandPollTimer);
+      remoteCommandPollTimer = 0;
+    } else {
+      return;
+    }
+  }
+  remoteCommandBridgeGlobalOnly = globalOnly;
+  pollRemoteQuizReplies(options);
+  remoteCommandPollTimer = window.setInterval(() => pollRemoteQuizReplies(options), 8000);
+  writeRuntimeLog("info", "remote_command_bridge_started", {
+    intervalMs: 8000,
+    globalOnly
+  });
 }
 
+function startRemoteQuizBridge(questions) {
+  if (!questions.length) return;
+  if (!remoteQuizStarted) {
+    remoteQuizStarted = true;
+    sendRemoteQuizIfNeeded(questions);
+  }
+  startRemoteCommandBridge();
+}

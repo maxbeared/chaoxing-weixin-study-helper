@@ -63,6 +63,7 @@ function writeRuntimeLog(level, event, details = {}) {
       source: "content",
       event,
       details: {
+        diagnosticSessionId,
         pageTitle: titleForPage(),
         pageUrl: location.href,
         frameUrl: location.href,
@@ -110,4 +111,3 @@ function installRuntimeErrorReporter() {
     notify("unhandledrejection", event.reason, "Promise 执行失败");
   });
 }
-

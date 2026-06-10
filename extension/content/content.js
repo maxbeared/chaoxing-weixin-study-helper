@@ -1,5 +1,12 @@
 installRuntimeErrorReporter();
 loadSettings();
+writeRuntimeLog("info", "content_script_started", {
+  readyState: document.readyState,
+  pageAgeMs: Date.now() - contentScriptStartedAt
+});
+if (window.top === window) {
+  startRemoteCommandBridge({ globalOnly: true });
+}
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "sync") return;
   for (const [key, change] of Object.entries(changes)) {
