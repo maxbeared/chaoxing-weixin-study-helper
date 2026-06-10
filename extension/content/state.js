@@ -25,9 +25,12 @@ const diagnosticSessionId = `${Date.now().toString(36)}-${Math.random().toString
 let playedSinceNavigation = false;
 let jobCompleteAutoNextStarted = false;
 let completedJobMarkerAutoNextPending = false;
+let noVideoAutoNextPending = false;
+let noVideoAutoNextStarted = false;
 const AUTOPLAY_KEY = "audioCheckAutoPlayNextUntil";
 const AUTO_NEXT_CLAIM_KEY = "audioCheckAutoNextClaim";
 const COMPLETED_JOB_MARKER_DELAY_MS = 2500;
+const NO_VIDEO_AUTO_NEXT_DELAY_MS = 10000;
 const NEXT_SELECTORS = [
   "#prevNextFocusNext",
   "#prevNextFocusNext a",

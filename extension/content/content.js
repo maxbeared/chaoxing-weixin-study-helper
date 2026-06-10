@@ -20,6 +20,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 scanVideosDeep();
 scanCompletedJobMarkers();
+scheduleNoVideoChapterAutoNext();
 watchManualSubmitClicks();
 ensureQuizPanel();
 scheduleWrongQuestionScan();
@@ -33,6 +34,7 @@ const observer = new MutationObserver((mutations) => {
   }
   scanVideosDeep();
   scanCompletedJobMarkers();
+  scheduleNoVideoChapterAutoNext();
   ensureQuizPanel();
   scheduleWrongQuestionScan();
   clickNextConfirmIfShown();
@@ -41,4 +43,5 @@ observer.observe(document.documentElement, { childList: true, subtree: true });
 setInterval(() => {
   scanVideosDeep();
   scanCompletedJobMarkers();
+  scheduleNoVideoChapterAutoNext();
 }, 3000);

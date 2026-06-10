@@ -355,6 +355,112 @@ function scanCompletedJobMarkers(root = document, seen = new WeakSet(), depth = 
   });
 }
 
+function hasQuizQuestionsInPage() {
+  try {
+    if (typeof extractQuestions === "function" && extractQuestions().length > 0) return true;
+  } catch {
+    // Quiz extraction can fail on partially loaded pages; fall back to selectors below.
+  }
+  return Boolean(document.querySelector(".singleQuesId, .TiMu, .Zy_TItle, li[role='radio'], li[role='checkbox']"));
+}
+
+async function getPageContentState() {
+  const localState = {
+    ok: true,
+    hasVideo: Boolean(findPrimaryVideoDeep() || findPrimaryVideo()),
+    hasQuiz: hasQuizQuestionsInPage(),
+    hasCompletedJobMarker: hasCompletedJobMarkerInPage(),
+    hasNextButton: Boolean(findNextButton()),
+    frameCount: 1,
+    source: "content"
+  };
+
+  try {
+    const response = await askExtension({
+      type: "page-content-state-request",
+      pageUrl: location.href,
+      ts: Date.now()
+    });
+    if (response?.ok) return response;
+  } catch {
+    // The local state is sufficient when the background worker is unavailable.
+  }
+  return localState;
+}
+
+async function scheduleNoVideoChapterAutoNext() {
+  if (window.top !== window) return;
+  if (!settings.enabled || !settings.autoNextOnEnded) return;
+  if (noVideoAutoNextPending || noVideoAutoNextStarted || jobCompleteAutoNextStarted) return;
+  if (hasRemoteSubmitPending()) return;
+
+  noVideoAutoNextPending = true;
+  const pageKey = getAutoNextPageKey();
+  const startedAt = Date.now();
+  writeRuntimeLog("info", "auto_next_no_video_check_scheduled", {
+    delayMs: NO_VIDEO_AUTO_NEXT_DELAY_MS,
+    diagnostic: getAutoNextDiagnostic(document)
+  });
+
+  await wait(NO_VIDEO_AUTO_NEXT_DELAY_MS);
+
+  try {
+    if (!settings.enabled || !settings.autoNextOnEnded || noVideoAutoNextStarted || jobCompleteAutoNextStarted) {
+      writeRuntimeLog("info", "auto_next_no_video_check_cancelled", {
+        reason: !settings.enabled ? "disabled" : !settings.autoNextOnEnded ? "auto_next_disabled" : "already_started",
+        diagnostic: getAutoNextDiagnostic(document)
+      });
+      return;
+    }
+    if (getAutoNextPageKey() !== pageKey) {
+      writeRuntimeLog("info", "auto_next_no_video_check_cancelled", {
+        reason: "page_changed",
+        diagnostic: getAutoNextDiagnostic(document)
+      });
+      return;
+    }
+    if (hasRemoteSubmitPending()) {
+      writeRuntimeLog("info", "auto_next_no_video_check_cancelled", {
+        reason: "remote_submit_pending",
+        diagnostic: getAutoNextDiagnostic(document)
+      });
+      return;
+    }
+
+    const state = await getPageContentState();
+    const hasVideo = Boolean(state.hasVideo);
+    const hasCompletedJobMarker = Boolean(state.hasCompletedJobMarker);
+    const hasNextButton = Boolean(state.hasNextButton);
+    if (hasVideo || hasCompletedJobMarker || !hasNextButton) {
+      writeRuntimeLog("info", "auto_next_no_video_check_cancelled", {
+        reason: hasVideo ? "video_found" : hasCompletedJobMarker ? "completed_marker_found" : "next_button_missing",
+        elapsedMs: Date.now() - startedAt,
+        pageState: state,
+        diagnostic: getAutoNextDiagnostic(document)
+      });
+      return;
+    }
+    if (!claimAutoNext("no-video-chapter")) {
+      writeRuntimeLog("info", "auto_next_no_video_check_cancelled", {
+        reason: "claim_rejected",
+        pageState: state,
+        diagnostic: getAutoNextDiagnostic(document)
+      });
+      return;
+    }
+
+    noVideoAutoNextStarted = true;
+    writeRuntimeLog("info", "auto_next_no_video_chapter", {
+      elapsedMs: Date.now() - startedAt,
+      pageState: state,
+      diagnostic: getAutoNextDiagnostic(document)
+    });
+    clickNextLesson({ marker: "no-video-chapter", noticeSent: false });
+  } finally {
+    noVideoAutoNextPending = false;
+  }
+}
+
 function markAutoPlayWindow() {
   try {
     sessionStorage.setItem(AUTOPLAY_KEY, String(Date.now() + 45_000));

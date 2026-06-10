@@ -651,6 +651,85 @@ async function clickNextInAllFrames(sender, message = {}) {
   return response;
 }
 
+async function collectPageContentState(sender, message = {}) {
+  const tabId = sender.tab?.id;
+  if (!tabId) {
+    appendExtensionLog("error", "background", "page_content_state_failed", { error: "No tab id for page content state request." }, sender);
+    return { ok: false, error: "No tab id for page content state request." };
+  }
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    func: () => {
+      const selectors = [
+        "#prevNextFocusNext",
+        "#prevNextFocusNext a",
+        ".prev_next.next a",
+        ".prev_next.next",
+        ".jb_btn.prev_next.next",
+        ".jb_btn.prev_next.next a",
+        "[role='button'][onclick*='PCount.next']",
+        "[onclick*='PCount.next']"
+      ];
+      const isVisible = (element) => {
+        if (!(element instanceof HTMLElement)) return false;
+        const style = getComputedStyle(element);
+        if (style.display === "none" || style.visibility === "hidden" || style.pointerEvents === "none") return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const normalizeText = (text) => String(text || "").replace(/\s+/g, " ").trim();
+      const isNextLikeElement = (element) => {
+        if (!(element instanceof HTMLElement)) return false;
+        const onclick = String(element.getAttribute("onclick") || "");
+        if (/PCount\.next/i.test(onclick)) return true;
+        const text = normalizeText([
+          element.innerText,
+          element.textContent,
+          element.getAttribute("title"),
+          element.getAttribute("aria-label"),
+          element.getAttribute("value")
+        ].filter(Boolean).join(" "));
+        if (/涓婁竴鑺倈涓婁竴绔爘涓婁竴涓獆涓婁竴璇緗prev|previous/i.test(text)) return false;
+        if (/涓嬩竴鑺倈涓嬩竴绔爘涓嬩竴涓獆涓嬩竴璇緗next/i.test(text)) return true;
+        return element.id === "prevNextFocusNext";
+      };
+      const selectorNextCount = selectors.reduce((count, selector) => {
+        return count + Array.from(document.querySelectorAll(selector)).filter(isVisible).length;
+      }, 0);
+      const fallbackNext = Array.from(document.querySelectorAll("a, button, [role='button'], input[type='button'], input[type='submit'], [onclick]"))
+        .some((item) => isVisible(item) && isNextLikeElement(item));
+      const completedMarkers = Array.from(document.querySelectorAll(
+        ".ans-job-icon-clear[aria-label='浠诲姟鐐瑰凡瀹屾垚'], .ans-job-icon-clear[aria-label*='宸插畬鎴?]"
+      )).filter(isVisible).length;
+      return {
+        frameUrl: location.href,
+        frameTitle: document.title,
+        readyState: document.readyState,
+        videoCount: document.querySelectorAll("video").length,
+        quizCount: document.querySelectorAll(".singleQuesId, .TiMu, .Zy_TItle, li[role='radio'], li[role='checkbox']").length,
+        completedMarkerCount: completedMarkers,
+        nextCandidateCount: selectorNextCount,
+        hasNextButton: selectorNextCount > 0 || fallbackNext
+      };
+    }
+  });
+
+  const frameResults = results.map((item) => ({ frameId: item.frameId, result: item.result })).slice(0, 30);
+  const response = {
+    ok: true,
+    pageUrl: message.pageUrl || sender.tab?.url || "",
+    frameCount: results.length,
+    hasVideo: results.some((item) => Number(item.result?.videoCount || 0) > 0),
+    hasQuiz: results.some((item) => Number(item.result?.quizCount || 0) > 0),
+    hasCompletedJobMarker: results.some((item) => Number(item.result?.completedMarkerCount || 0) > 0),
+    hasNextButton: results.some((item) => item.result?.hasNextButton),
+    frameResults
+  };
+  appendExtensionLog("info", "background", "page_content_state_collected", response, sender);
+  return response;
+}
+
 installRuntimeErrorReporter();
 
 chrome.alarms.create(BACKGROUND_REMOTE_ALARM, {
@@ -707,6 +786,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "auto-next-request") {
     clickNextInAllFrames(sender, message).then(sendResponse).catch((error) => {
       appendExtensionLog("error", "background", "auto_next_exception", {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack || "" : ""
+      }, sender);
+      sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    });
+    return true;
+  }
+  if (message?.type === "page-content-state-request") {
+    collectPageContentState(sender, message).then(sendResponse).catch((error) => {
+      appendExtensionLog("error", "background", "page_content_state_exception", {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack || "" : ""
       }, sender);
