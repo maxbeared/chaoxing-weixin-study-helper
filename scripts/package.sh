@@ -78,9 +78,6 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 NATIVE_DIR="$ROOT_DIR/native-host"
 RELEASE_DIR="${OUTPUT_DIR:-$ROOT_DIR/release}"
 STAMP=$(date +"%Y%m%d-%H%M%S")
-NAME="${PACKAGE_NAME:-chaoxing-weixin-study-helper-test-$STAMP}"
-STAGE="$RELEASE_DIR/$NAME"
-ZIP_PATH="$STAGE.zip"
 
 require_tool() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -110,6 +107,17 @@ arch_name() {
       ;;
   esac
 }
+
+if [ "$BUILD_CURRENT" -eq 1 ]; then
+  DEFAULT_NAME="chaoxing-weixin-study-helper-$(platform_name)-$(arch_name)-$STAMP"
+elif [ "$INCLUDE_EXISTING_DIST" -eq 1 ]; then
+  DEFAULT_NAME="chaoxing-weixin-study-helper-with-dist-$STAMP"
+else
+  DEFAULT_NAME="chaoxing-weixin-study-helper-source-$STAMP"
+fi
+NAME="${PACKAGE_NAME:-$DEFAULT_NAME}"
+STAGE="$RELEASE_DIR/$NAME"
+ZIP_PATH="$STAGE.zip"
 
 assert_in_root() {
   path_to_check="$1"
@@ -261,7 +269,7 @@ if [ -e "$ZIP_PATH" ]; then
 fi
 
 mkdir -p "$STAGE"
-for item in extension scripts docs install.cmd install.sh README.md package.cmd; do
+for item in extension scripts docs install.cmd install.sh README.md package.cmd package-source.cmd; do
   copy_project_item "$item"
 done
 copy_native_host

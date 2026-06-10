@@ -1,10 +1,12 @@
 # Packaging
 
-Use the root `package.cmd` for one-click packaging on Windows:
+Use the root `package.cmd` for one-click Windows release packaging:
 
 ```cmd
 package.cmd
 ```
+
+This builds `native-host/dist/win-x64/chaoxing-weixin-native-host.exe` first and includes it in the zip. Users installing this package do not need Node.js or npm.
 
 On macOS/Linux, use:
 
@@ -12,9 +14,19 @@ On macOS/Linux, use:
 ./scripts/package.sh --build-current
 ```
 
-The default package is written to `release/chaoxing-weixin-study-helper-test-<timestamp>.zip`.
+This builds the native host for the current OS/CPU and includes the resulting `native-host/dist/` directory in the zip.
 
-By default this is a source install package. It includes the extension, install scripts, docs, and native host source files, but excludes `node_modules`, `.state`, generated native messaging manifests, and Git metadata. The target machine needs Node.js 22+ and npm; `install.cmd` will run `npm install` during setup.
+Windows release packages are written to `release/chaoxing-weixin-study-helper-win-x64-<timestamp>.zip` by default.
+
+macOS/Linux release packages are written to `release/chaoxing-weixin-study-helper-<platform>-<arch>-<timestamp>.zip` by default.
+
+To create a source install package on Windows instead, use:
+
+```cmd
+package-source.cmd
+```
+
+Source install packages are written to `release/chaoxing-weixin-study-helper-source-<timestamp>.zip` by default. They include the extension, install scripts, docs, and native host source files, but exclude `node_modules`, `.state`, generated native messaging manifests, and Git metadata. The target machine needs Node.js 22+ and npm; `install.cmd` will run `npm install` during setup.
 
 Packaged zips include a generated root `manifest.json`, so Chrome/Edge can load either the extracted package root or the `extension/` subfolder as the unpacked extension.
 

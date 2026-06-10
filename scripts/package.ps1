@@ -17,7 +17,14 @@ $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $releaseDir = if ($OutputDir) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDir) } else { Join-Path $root "release" }
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$name = if ($PackageName) { $PackageName } else { "chaoxing-weixin-study-helper-test-$stamp" }
+$defaultName = if ($BuildWinX64) {
+  "chaoxing-weixin-study-helper-win-x64-$stamp"
+} elseif ($IncludeExistingDist) {
+  "chaoxing-weixin-study-helper-with-dist-$stamp"
+} else {
+  "chaoxing-weixin-study-helper-source-$stamp"
+}
+$name = if ($PackageName) { $PackageName } else { $defaultName }
 $stage = Join-Path $releaseDir $name
 $zip = "$stage.zip"
 $nativeDir = Join-Path $root "native-host"
@@ -321,7 +328,7 @@ if (Test-Path $zip) {
 
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
-foreach ($item in @("extension", "scripts", "docs", "install.cmd", "install.sh", "README.md", "package.cmd")) {
+foreach ($item in @("extension", "scripts", "docs", "install.cmd", "install.sh", "README.md", "package.cmd", "package-source.cmd")) {
   Copy-ProjectItem -RelativePath $item
 }
 Copy-NativeHost
