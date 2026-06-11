@@ -33,6 +33,8 @@ const AUTO_NEXT_CONFIRM_KEY = "audioCheckAutoNextConfirm";
 const COMPLETED_JOB_MARKER_DELAY_MS = 2500;
 const NO_VIDEO_AUTO_NEXT_DELAY_MS = 10000;
 const NEXT_CONFIRM_WINDOW_MS = 15_000;
+const STALLED_ZERO_RELOAD_COOLDOWN_MS = 5 * 60_000;
+const STALLED_ZERO_RELOAD_KEY_PREFIX = "audioCheckStalledZeroReload:";
 const NEXT_SELECTORS = [
   "#prevNextFocusNext",
   "#prevNextFocusNext a",

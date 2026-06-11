@@ -617,6 +617,52 @@ function getPlaybackProgressSummary() {
   return `视频进度：${formatPlaybackTime(currentTime)} / ${formatPlaybackTime(duration)}（${percent}），${playbackStateLabel(video)}`;
 }
 
+function stalledZeroReloadKey() {
+  return `${STALLED_ZERO_RELOAD_KEY_PREFIX}${location.origin}${location.pathname}`;
+}
+
+function shouldReloadForZeroProgressStall(video) {
+  if (!(video instanceof HTMLVideoElement)) return false;
+  const currentTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+  const duration = Number.isFinite(video.duration) ? video.duration : 0;
+  if (currentTime > 0.5 || duration > 0.5) return false;
+  try {
+    const last = Number(sessionStorage.getItem(stalledZeroReloadKey()) || "0");
+    return Date.now() - last > STALLED_ZERO_RELOAD_COOLDOWN_MS;
+  } catch {
+    return true;
+  }
+}
+
+function markZeroProgressStallReloaded() {
+  try {
+    sessionStorage.setItem(stalledZeroReloadKey(), String(Date.now()));
+  } catch {
+    // Ignore storage restrictions.
+  }
+}
+
+function requestTargetTabReloadForZeroProgressStall(video, reason) {
+  markZeroProgressStallReloaded();
+  writeRuntimeLog("info", "video_stalled_zero_progress_target_reload_requested", {
+    reason,
+    video: describeVideoForLog(video)
+  });
+  try {
+    chrome.runtime.sendMessage({
+      type: "reload-target-tab",
+      reason: "video_stalled_zero_progress",
+      pageUrl: location.href,
+      video: describeVideoForLog(video)
+    });
+  } catch (error) {
+    writeRuntimeLog("error", "video_stalled_zero_progress_target_reload_failed", {
+      error: error instanceof Error ? error.message : String(error),
+      reason
+    });
+  }
+}
+
 function playWithVideoJs(video) {
   try {
     if (typeof window.videojs !== "function") return false;
@@ -947,6 +993,11 @@ function onStalled(video, reason) {
   const previous = lastProgress.get(video) || 0;
   const now = Date.now();
   if (now - previous > 5000) {
+    if (shouldReloadForZeroProgressStall(video)) {
+      requestTargetTabReloadForZeroProgressStall(video, reason);
+      lastProgress.set(video, now);
+      return;
+    }
     sendPlaybackEvent(video, reason);
     lastProgress.set(video, now);
   }

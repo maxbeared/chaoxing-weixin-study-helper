@@ -434,6 +434,35 @@ async function updatePowerKeepAwake(message, sender) {
   }
 }
 
+async function reloadTargetTab(message, sender) {
+  const tabId = sender.tab?.id;
+  if (!tabId) {
+    appendExtensionLog("error", "background", "reload_target_tab_failed", {
+      reason: message.reason || "",
+      error: "No sender tab id."
+    }, sender);
+    return { ok: false, error: "No sender tab id." };
+  }
+  try {
+    await chrome.tabs.reload(tabId);
+    appendExtensionLog("info", "background", "reload_target_tab_requested", {
+      reason: message.reason || "",
+      targetTabId: tabId,
+      pageUrl: message.pageUrl || sender.tab?.url || "",
+      video: message.video || null
+    }, sender);
+    return { ok: true };
+  } catch (error) {
+    appendExtensionLog("error", "background", "reload_target_tab_failed", {
+      reason: message.reason || "",
+      targetTabId: tabId,
+      pageUrl: message.pageUrl || sender.tab?.url || "",
+      error: error instanceof Error ? error.message : String(error)
+    }, sender);
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 function installRuntimeErrorReporter() {
   const notify = (kind, error, fallback = "") => {
     const message = error instanceof Error
@@ -815,6 +844,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.type === "power-keep-awake") {
     updatePowerKeepAwake(message, sender).then(sendResponse);
+    return true;
+  }
+  if (message?.type === "reload-target-tab") {
+    reloadTargetTab(message, sender).then(sendResponse);
     return true;
   }
   if (message?.type === "get-extension-logs") {
