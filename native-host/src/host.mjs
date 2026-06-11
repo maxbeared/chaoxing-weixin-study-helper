@@ -31,9 +31,13 @@ const SYNC_FILE = path.join(STATE_DIR, "sync.json");
 const LLM_FILE = path.join(STATE_DIR, "llm.json");
 const ACTIVE_LOGIN_FILE = path.join(STATE_DIR, "active-logins.json");
 const CXSECRET_TABLE_FILE = path.join(STATE_DIR, "cxsecret-table.json");
+const SESSION_FILE = path.join(STATE_DIR, "sessions.json");
 const activeLogins = new Map();
 let typrModule = null;
 let cxSecretTablePromise = null;
+const SESSION_EXPIRED_ERRCODE = -14;
+const SESSION_PAUSE_DURATION_MS = 60 * 60_000;
+const NOTIFY_START_INTERVAL_MS = 30 * 60_000;
 
 // Runtime paths, state files, and logging.
 function buildClientVersion(version) {
@@ -174,6 +178,35 @@ function loadSyncState() {
 function saveSyncState(state) {
   ensureStateDir();
   fs.writeFileSync(SYNC_FILE, JSON.stringify(state, null, 2), "utf8");
+}
+
+function loadSessionState() {
+  try {
+    if (!fs.existsSync(SESSION_FILE)) return {};
+    const parsed = JSON.parse(fs.readFileSync(SESSION_FILE, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveSessionState(state) {
+  ensureStateDir();
+  fs.writeFileSync(SESSION_FILE, JSON.stringify(state, null, 2), "utf8");
+}
+
+function clearAccountRuntimeState(accountId) {
+  const syncState = loadSyncState();
+  if (syncState[accountId]) {
+    delete syncState[accountId];
+    saveSyncState(syncState);
+  }
+
+  const sessionState = loadSessionState();
+  if (sessionState[accountId]) {
+    delete sessionState[accountId];
+    saveSessionState(sessionState);
+  }
 }
 
 function loadLlmSettings() {
@@ -411,6 +444,7 @@ function upsertAccount(account) {
     accounts,
     defaultAccountId: account.accountId
   });
+  clearAccountRuntimeState(account.accountId);
 }
 
 function resolveAccount(accountId) {
@@ -458,6 +492,115 @@ function buildHeaders(token) {
   return headers;
 }
 
+class WeixinBusinessError extends Error {
+  constructor(endpoint, response) {
+    const ret = response?.ret;
+    const errcode = response?.errcode;
+    const errmsg = response?.errmsg || response?.message || "";
+    super(`${endpoint} business error: ret=${ret ?? ""} errcode=${errcode ?? ""}${errmsg ? ` errmsg=${errmsg}` : ""}`);
+    this.name = "WeixinBusinessError";
+    this.endpoint = endpoint;
+    this.response = response;
+    this.ret = ret;
+    this.errcode = errcode;
+  }
+}
+
+function hasBusinessError(response) {
+  if (!response || typeof response !== "object") return false;
+  return (response.ret !== undefined && Number(response.ret) !== 0) ||
+    (response.errcode !== undefined && Number(response.errcode) !== 0);
+}
+
+function isSessionExpiredError(error) {
+  if (!error || typeof error !== "object") return false;
+  return Number(error.errcode) === SESSION_EXPIRED_ERRCODE || Number(error.ret) === SESSION_EXPIRED_ERRCODE;
+}
+
+function assertSessionActive(account) {
+  const state = loadSessionState();
+  const accountState = state[account.accountId] || {};
+  const pausedUntil = Number(accountState.pausedUntil || 0);
+  if (pausedUntil && Date.now() < pausedUntil) {
+    const minutes = Math.ceil((pausedUntil - Date.now()) / 60_000);
+    throw new Error(`Weixin session is paused for ${minutes} min after errcode ${SESSION_EXPIRED_ERRCODE}. Reconnect Weixin if messages still cannot be sent.`);
+  }
+  if (pausedUntil && Date.now() >= pausedUntil) {
+    delete accountState.pausedUntil;
+    state[account.accountId] = accountState;
+    saveSessionState(state);
+  }
+}
+
+function pauseSession(account, reason = "session_expired") {
+  const state = loadSessionState();
+  state[account.accountId] = {
+    ...(state[account.accountId] || {}),
+    pausedUntil: Date.now() + SESSION_PAUSE_DURATION_MS,
+    pauseReason: reason,
+    pausedAt: new Date().toISOString()
+  };
+  saveSessionState(state);
+  appendHostLog("error", "weixin_session_paused", {
+    accountId: account.accountId,
+    reason,
+    durationMs: SESSION_PAUSE_DURATION_MS
+  });
+}
+
+function noteSuccessfulSession(account) {
+  const state = loadSessionState();
+  const accountState = state[account.accountId] || {};
+  if (accountState.pausedUntil) {
+    delete accountState.pausedUntil;
+    delete accountState.pauseReason;
+    delete accountState.pausedAt;
+    state[account.accountId] = accountState;
+    saveSessionState(state);
+  }
+}
+
+function rememberContextToken(account, targetId, contextToken) {
+  const target = String(targetId || "").trim();
+  const token = String(contextToken || "").trim();
+  if (!target || !token) return;
+  const state = loadSessionState();
+  const accountState = state[account.accountId] || {};
+  const contextTokens = accountState.contextTokens && typeof accountState.contextTokens === "object"
+    ? accountState.contextTokens
+    : {};
+  contextTokens[target] = {
+    token,
+    savedAt: new Date().toISOString()
+  };
+  state[account.accountId] = {
+    ...accountState,
+    contextTokens
+  };
+  saveSessionState(state);
+}
+
+function getContextToken(account, targetId, fallback = "") {
+  const target = String(targetId || "").trim();
+  if (!target) return fallback || undefined;
+  const state = loadSessionState();
+  const saved = state[account.accountId]?.contextTokens?.[target]?.token;
+  return saved || fallback || undefined;
+}
+
+async function withSessionExpiryPause(account, reason, operation) {
+  try {
+    const result = await operation();
+    noteSuccessfulSession(account);
+    return result;
+  } catch (error) {
+    if (isSessionExpiredError(error)) {
+      pauseSession(account, reason);
+    }
+    throw error;
+  }
+}
+
 function baseInfo() {
   return {
     channel_version: CHANNEL_VERSION,
@@ -489,7 +632,7 @@ async function apiGet(baseUrl, endpoint, timeoutMs = DEFAULT_API_TIMEOUT_MS) {
   }, timeoutMs);
 }
 
-async function apiPost(baseUrl, endpoint, body, token, timeoutMs = DEFAULT_API_TIMEOUT_MS) {
+async function apiPost(baseUrl, endpoint, body, token, timeoutMs = DEFAULT_API_TIMEOUT_MS, options = {}) {
   const url = new URL(endpoint, ensureTrailingSlash(baseUrl));
   return withTimeout(async (signal) => {
     const response = await fetch(url, {
@@ -500,7 +643,11 @@ async function apiPost(baseUrl, endpoint, body, token, timeoutMs = DEFAULT_API_T
     });
     const text = await response.text();
     if (!response.ok) throw new Error(`POST ${endpoint} ${response.status}: ${text}`);
-    return text ? JSON.parse(text) : {};
+    const parsed = text ? JSON.parse(text) : {};
+    if (options.checkBusinessErrors !== false && hasBusinessError(parsed)) {
+      throw new WeixinBusinessError(endpoint, parsed);
+    }
+    return parsed;
   }, timeoutMs);
 }
 
@@ -512,6 +659,53 @@ async function fetchQRCode(botType = DEFAULT_BOT_TYPE) {
     undefined,
     DEFAULT_API_TIMEOUT_MS
   );
+}
+
+async function ensureNotifyStart(account) {
+  assertSessionActive(account);
+
+  const state = loadSessionState();
+  const accountState = state[account.accountId] || {};
+  const lastNotifyStartAt = Number(accountState.lastNotifyStartAt || 0);
+  if (Date.now() - lastNotifyStartAt < NOTIFY_START_INTERVAL_MS) return;
+
+  try {
+    const response = await apiPost(
+      account.baseUrl || FIXED_BASE_URL,
+      "ilink/bot/msg/notifystart",
+      { base_info: baseInfo() },
+      account.token,
+      DEFAULT_API_TIMEOUT_MS,
+      { checkBusinessErrors: false }
+    );
+    state[account.accountId] = {
+      ...accountState,
+      lastNotifyStartAt: Date.now(),
+      lastNotifyStartResponse: {
+        ret: response.ret,
+        errcode: response.errcode,
+        errmsg: response.errmsg || ""
+      }
+    };
+    saveSessionState(state);
+    if (hasBusinessError(response)) {
+      appendHostLog("error", "notify_start_business_error", {
+        accountId: account.accountId,
+        response
+      });
+      if (Number(response.errcode) === SESSION_EXPIRED_ERRCODE || Number(response.ret) === SESSION_EXPIRED_ERRCODE) {
+        pauseSession(account, "notify_start_session_expired");
+      }
+    } else {
+      appendHostLog("info", "notify_start_ok", { accountId: account.accountId });
+    }
+  } catch (error) {
+    appendHostLog("error", "notify_start_failed", {
+      accountId: account.accountId,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+  assertSessionActive(account);
 }
 
 async function pollQRStatus(login, verifyCode) {
@@ -710,6 +904,7 @@ function encryptAesEcb(plaintext, key) {
 }
 
 async function uploadImageBuffer(account, targetId, buffer) {
+  await ensureNotifyStart(account);
   const rawsize = buffer.length;
   const rawfilemd5 = crypto.createHash("md5").update(buffer).digest("hex");
   const filesize = aesEcbPaddedSize(rawsize);
@@ -717,23 +912,23 @@ async function uploadImageBuffer(account, targetId, buffer) {
   const aeskey = crypto.randomBytes(16);
   const aeskeyHex = aeskey.toString("hex");
 
-  const uploadUrlResp = await apiPost(
+  const uploadUrlResp = await withSessionExpiryPause(account, "getuploadurl_session_expired", () => apiPost(
     account.baseUrl || FIXED_BASE_URL,
     "ilink/bot/getuploadurl",
     {
-      filekey,
-      media_type: 1,
-      to_user_id: targetId,
-      rawsize,
-      rawfilemd5,
-      filesize,
-      no_need_thumb: true,
-      aeskey: aeskeyHex,
-      base_info: baseInfo()
-    },
-    account.token,
-    DEFAULT_API_TIMEOUT_MS
-  );
+        filekey,
+        media_type: 1,
+        to_user_id: targetId,
+        rawsize,
+        rawfilemd5,
+        filesize,
+        no_need_thumb: true,
+        aeskey: aeskeyHex,
+        base_info: baseInfo()
+      },
+      account.token,
+      DEFAULT_API_TIMEOUT_MS
+    ));
   const uploadParam = uploadUrlResp.upload_param;
   if (!uploadParam) {
     throw new Error(`getuploadurl returned no upload_param: ${JSON.stringify(uploadUrlResp)}`);
@@ -771,6 +966,8 @@ async function sendText(message) {
   if (!text) throw new Error("text is required.");
 
   const account = resolveAccount(message.accountId);
+  await ensureNotifyStart(account);
+  const contextToken = getContextToken(account, targetId, message.contextToken || "");
   const body = {
     msg: {
       from_user_id: "",
@@ -784,13 +981,15 @@ async function sendText(message) {
           text_item: { text }
         }
       ],
-      context_token: message.contextToken || undefined,
+      context_token: contextToken,
       run_id: message.runId || undefined
     },
     base_info: baseInfo()
   };
 
-  const response = await apiPost(account.baseUrl || FIXED_BASE_URL, "ilink/bot/sendmessage", body, account.token);
+  const response = await withSessionExpiryPause(account, "sendmessage_session_expired", () => (
+    apiPost(account.baseUrl || FIXED_BASE_URL, "ilink/bot/sendmessage", body, account.token)
+  ));
   return { ok: true, response };
 }
 
@@ -817,6 +1016,7 @@ async function sendImageDataUrl(message) {
   }
 
   const uploaded = await uploadImageBuffer(account, targetId, buffer);
+  const contextToken = getContextToken(account, targetId, message.contextToken || "");
   const body = {
     msg: {
       from_user_id: "",
@@ -837,18 +1037,21 @@ async function sendImageDataUrl(message) {
           }
         }
       ],
-      context_token: message.contextToken || undefined,
+      context_token: contextToken,
       run_id: message.runId || undefined
     },
     base_info: baseInfo()
   };
 
-  const response = await apiPost(account.baseUrl || FIXED_BASE_URL, "ilink/bot/sendmessage", body, account.token);
+  const response = await withSessionExpiryPause(account, "sendimage_session_expired", () => (
+    apiPost(account.baseUrl || FIXED_BASE_URL, "ilink/bot/sendmessage", body, account.token)
+  ));
   return { ok: true, response };
 }
 
 async function pollMessages(message) {
   const account = resolveAccount(message.accountId);
+  await ensureNotifyStart(account);
   const syncState = loadSyncState();
   const accountSync = syncState[account.accountId] || {};
   let response;
@@ -866,10 +1069,20 @@ async function pollMessages(message) {
   } catch (error) {
     if (error?.name === "AbortError") {
       response = { msgs: [], get_updates_buf: accountSync.getUpdatesBuf || "" };
+    } else if (isSessionExpiredError(error)) {
+      pauseSession(account, "getupdates_session_expired");
+      return {
+        ok: false,
+        sessionExpired: true,
+        errcode: SESSION_EXPIRED_ERRCODE,
+        error: "Weixin session expired. Reconnect Weixin in the extension popup."
+      };
     } else {
       throw error;
     }
   }
+
+  noteSuccessfulSession(account);
 
   if (response.get_updates_buf !== undefined) {
     syncState[account.accountId] = {
@@ -880,6 +1093,12 @@ async function pollMessages(message) {
   }
 
   const messages = Array.isArray(response.msgs) ? response.msgs : [];
+  for (const item of messages) {
+    const target = item.group_id || item.from_user_id || "";
+    if (target && item.context_token) {
+      rememberContextToken(account, target, item.context_token);
+    }
+  }
   return {
     ok: true,
     accountId: account.accountId,

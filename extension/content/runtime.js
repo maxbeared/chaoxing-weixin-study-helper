@@ -2,6 +2,9 @@
 function loadSettings() {
   chrome.storage.sync.get(DEFAULTS, (stored) => {
     settings = { ...DEFAULTS, ...stored };
+    if (typeof refreshRemoteCommandBridge === "function") {
+      refreshRemoteCommandBridge();
+    }
   });
 }
 

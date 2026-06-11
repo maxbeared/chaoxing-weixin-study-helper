@@ -65,7 +65,11 @@ async function scanAndRecordWrongQuestions() {
     if (remoteSubmit) {
       const settings = await remoteQuizSettings();
       if (settings.targetId) {
-        await sendWeixinText(settings, formatWrongQuestionsForWeixin(result, saved));
+        sendWeixinText(settings, formatWrongQuestionsForWeixin(result, saved)).catch((error) => {
+          writeRuntimeLog("error", "wrong_questions_weixin_reply_failed", {
+            error: error instanceof Error ? error.message : String(error)
+          });
+        });
       }
     }
   } finally {
@@ -166,6 +170,14 @@ async function sendRemoteQuizIfNeeded(questions) {
     }
   }
   sessionStorage.setItem(key, String(Date.now()));
+}
+
+function runRemotePollOnce(options = {}) {
+  pollRemoteQuizReplies(options).catch((error) => {
+    writeRuntimeLog("error", "remote_poll_exception", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
 }
 
 async function handleQuestionTextCommand(command, settings) {
@@ -330,6 +342,10 @@ async function pollRemoteQuizReplies(options = {}) {
 
 function startRemoteCommandBridge(options = {}) {
   const globalOnly = Boolean(options.globalOnly);
+  if (!settings.enabled || !settings.targetId) {
+    stopRemoteCommandBridge("disabled_or_missing_target");
+    return;
+  }
   if (remoteCommandPollTimer) {
     if (remoteCommandBridgeGlobalOnly && !globalOnly) {
       window.clearInterval(remoteCommandPollTimer);
@@ -339,19 +355,38 @@ function startRemoteCommandBridge(options = {}) {
     }
   }
   remoteCommandBridgeGlobalOnly = globalOnly;
-  pollRemoteQuizReplies(options);
-  remoteCommandPollTimer = window.setInterval(() => pollRemoteQuizReplies(options), 8000);
+  runRemotePollOnce(options);
+  remoteCommandPollTimer = window.setInterval(() => runRemotePollOnce(options), 8000);
   writeRuntimeLog("info", "remote_command_bridge_started", {
     intervalMs: 8000,
     globalOnly
   });
 }
 
+function stopRemoteCommandBridge(reason = "stopped") {
+  if (!remoteCommandPollTimer) return;
+  window.clearInterval(remoteCommandPollTimer);
+  remoteCommandPollTimer = 0;
+  writeRuntimeLog("info", "remote_command_bridge_stopped", { reason });
+}
+
+function refreshRemoteCommandBridge() {
+  if (settings.enabled && settings.targetId && window.top === window) {
+    startRemoteCommandBridge({ globalOnly: true });
+  } else {
+    stopRemoteCommandBridge("settings_changed");
+  }
+}
+
 function startRemoteQuizBridge(questions) {
   if (!questions.length) return;
   if (!remoteQuizStarted) {
     remoteQuizStarted = true;
-    sendRemoteQuizIfNeeded(questions);
+    sendRemoteQuizIfNeeded(questions).catch((error) => {
+      writeRuntimeLog("error", "remote_quiz_initial_send_failed", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
   }
   startRemoteCommandBridge();
 }
